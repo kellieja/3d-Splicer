@@ -4,14 +4,29 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import type { PreviewData, PrinterProfile } from '../types';
 import type { TriangleSoup } from '../slicer/mesh';
 
+export interface ViewerMesh {
+  positions: TriangleSoup;
+  color: number;
+}
+
+/** A cut plane drawn as a translucent rectangle. */
+export interface CutPlane {
+  axis: 0 | 1 | 2;
+  value: number;
+  min: [number, number, number];
+  max: [number, number, number];
+}
+
 export interface ViewerProps {
   printer: PrinterProfile;
-  mesh: TriangleSoup | null;
+  meshes: ViewerMesh[];
+  planes?: CutPlane[];
   preview: PreviewData | null;
   mode: 'model' | 'preview';
   /** Highest layer shown in preview mode. */
   layer: number;
-  outOfBounds: boolean;
+  /** When this changes, the camera re-frames the bed and everything on it. */
+  frameKey?: string;
 }
 
 interface Scene {
@@ -20,17 +35,16 @@ interface Scene {
   camera: THREE.PerspectiveCamera;
   controls: OrbitControls;
   bed: THREE.Group;
-  model: THREE.Mesh;
+  model: THREE.Group;
+  planes: THREE.Group;
   toolpaths: THREE.LineSegments;
   current: THREE.LineSegments;
   render: () => void;
 }
 
-const MODEL_COLOR = 0x3b82f6;
-const ERROR_COLOR = 0xef4444;
 
 /** Three.js view of the build plate, the model and the sliced toolpaths. Z is up. */
-export function Viewer({ printer, mesh, preview, mode, layer, outOfBounds }: ViewerProps) {
+export function Viewer({ printer, meshes, planes = [], preview, mode, layer, frameKey }: ViewerProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<Scene | null>(null);
 
@@ -55,11 +69,10 @@ export function Viewer({ printer, mesh, preview, mode, layer, outOfBounds }: Vie
     const bed = new THREE.Group();
     scene.add(bed);
 
-    const model = new THREE.Mesh(
-      new THREE.BufferGeometry(),
-      new THREE.MeshStandardMaterial({ color: MODEL_COLOR, roughness: 0.55, metalness: 0.05 }),
-    );
+    const model = new THREE.Group();
     scene.add(model);
+    const planeGroup = new THREE.Group();
+    scene.add(planeGroup);
 
     const lineMat = new THREE.LineBasicMaterial({ vertexColors: true });
     const toolpaths = new THREE.LineSegments(new THREE.BufferGeometry(), lineMat);
@@ -88,7 +101,7 @@ export function Viewer({ printer, mesh, preview, mode, layer, outOfBounds }: Vie
     const ro = new ResizeObserver(resize);
     ro.observe(host);
 
-    sceneRef.current = { renderer, scene, camera, controls, bed, model, toolpaths, current, render };
+    sceneRef.current = { renderer, scene, camera, controls, bed, model, planes: planeGroup, toolpaths, current, render };
     resize();
 
     return () => {
@@ -104,37 +117,69 @@ export function Viewer({ printer, mesh, preview, mode, layer, outOfBounds }: Vie
   // Bed and build volume.
   useEffect(() => {
     const s = sceneRef.current!;
-    s.bed.clear();
+    disposeChildren(s.bed);
     s.bed.add(buildBed(printer));
-    const cx = printer.originCenter ? 0 : printer.bedX / 2;
-    const cy = printer.originCenter ? 0 : printer.bedY / 2;
-    const size = Math.max(printer.bedX, printer.bedY, printer.maxZ);
-    s.controls.target.set(cx, cy, Math.min(40, printer.maxZ / 4));
-    s.camera.position.set(cx + size * 0.2, cy - size * 1.35, size * 0.9);
-    s.camera.far = size * 20;
-    s.camera.updateProjectionMatrix();
     s.render();
   }, [printer]);
 
-  // Model mesh.
+  // Camera: frame the bed plus the model (which may be bigger than the bed).
+  const meshesRef = useRef(meshes);
+  meshesRef.current = meshes;
   useEffect(() => {
     const s = sceneRef.current!;
-    s.model.geometry.dispose();
-    const g = new THREE.BufferGeometry();
-    if (mesh) {
-      g.setAttribute('position', new THREE.BufferAttribute(mesh, 3));
-      g.computeVertexNormals();
+    const box = new THREE.Box3();
+    const x0 = printer.originCenter ? -printer.bedX / 2 : 0;
+    const y0 = printer.originCenter ? -printer.bedY / 2 : 0;
+    box.expandByPoint(new THREE.Vector3(x0, y0, 0));
+    box.expandByPoint(new THREE.Vector3(x0 + printer.bedX, y0 + printer.bedY, Math.min(printer.maxZ, 60)));
+    for (const m of meshesRef.current) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(m.positions, 3));
+      g.computeBoundingBox();
+      if (g.boundingBox) box.union(g.boundingBox);
     }
-    s.model.geometry = g;
+    const centre = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3()).length();
+    s.controls.target.set(centre.x, centre.y, Math.min(centre.z, box.min.z + (box.max.z - box.min.z) * 0.4));
+    s.camera.position.set(centre.x + size * 0.15, centre.y - size * 1.0, centre.z + size * 0.65);
+    s.camera.far = size * 20;
+    s.camera.updateProjectionMatrix();
     s.render();
-  }, [mesh]);
+  }, [printer, frameKey]);
 
+  // Model meshes (one per part when the model is split).
   useEffect(() => {
     const s = sceneRef.current!;
-    const mat = s.model.material as THREE.MeshStandardMaterial;
-    mat.color.setHex(outOfBounds ? ERROR_COLOR : MODEL_COLOR);
+    disposeChildren(s.model);
+    for (const m of meshes) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(m.positions, 3));
+      g.computeVertexNormals();
+      s.model.add(new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: m.color, roughness: 0.55, metalness: 0.05 })));
+    }
     s.render();
-  }, [outOfBounds]);
+  }, [meshes]);
+
+  // Cut planes.
+  useEffect(() => {
+    const s = sceneRef.current!;
+    disposeChildren(s.planes);
+    for (const p of planes) {
+      const pad = 6;
+      const size = [0, 1, 2].map((a) => (a === p.axis ? 0 : p.max[a] - p.min[a] + pad * 2));
+      const centre = [0, 1, 2].map((a) => (a === p.axis ? p.value : (p.min[a] + p.max[a]) / 2));
+      const geo = new THREE.BoxGeometry(Math.max(size[0], 0.01), Math.max(size[1], 0.01), Math.max(size[2], 0.01));
+      const mesh = new THREE.Mesh(
+        geo,
+        new THREE.MeshBasicMaterial({ color: 0xf97316, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false }),
+      );
+      mesh.position.set(centre[0], centre[1], centre[2]);
+      const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: 0xf97316 }));
+      edges.position.copy(mesh.position);
+      s.planes.add(mesh, edges);
+    }
+    s.render();
+  }, [planes]);
 
   // Toolpath preview.
   useEffect(() => {
@@ -159,6 +204,7 @@ export function Viewer({ printer, mesh, preview, mode, layer, outOfBounds }: Vie
     const s = sceneRef.current!;
     const showPreview = mode === 'preview' && !!preview;
     s.model.visible = !showPreview;
+    s.planes.visible = !showPreview;
     s.toolpaths.visible = showPreview;
     s.current.visible = showPreview;
     if (preview && showPreview) {
@@ -172,6 +218,16 @@ export function Viewer({ printer, mesh, preview, mode, layer, outOfBounds }: Vie
   }, [mode, layer, preview]);
 
   return <div className="viewer" ref={hostRef} aria-label="3D view of the build plate" role="img" />;
+}
+
+function disposeChildren(group: THREE.Group) {
+  for (const child of [...group.children]) {
+    const o = child as THREE.Mesh;
+    o.geometry?.dispose();
+    const mat = o.material as THREE.Material | undefined;
+    mat?.dispose();
+    group.remove(child);
+  }
 }
 
 function buildBed(p: PrinterProfile): THREE.Group {

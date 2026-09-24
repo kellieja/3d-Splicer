@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { strToU8, zipSync } from 'fflate';
 import type { FilamentProfile, ModelTransform, PrintSettings, PrinterProfile } from './types';
 import { BUILTIN_PRINTERS, DEFAULT_PRINTER_ID } from './profiles/printers';
 import { BUILTIN_FILAMENTS, DEFAULT_FILAMENT_ID } from './profiles/filaments';
@@ -15,14 +16,17 @@ import {
   type TriangleSoup,
 } from './slicer/mesh';
 import { KIND_COLORS } from './slicer';
+import { autoCuts, DEFAULT_DOWELS, plateSoup, type Cuts, type DowelOptions, type SplitOptions } from './slicer/split';
 import { loadModelFile, SUPPORTED_EXTENSIONS } from './lib/loaders';
 import { loadJSON, saveJSON } from './lib/storage';
 import { useSlicer } from './lib/useSlicer';
-import { Viewer } from './components/Viewer';
+import { useSplit } from './lib/useSplit';
+import { Viewer, type CutPlane, type ViewerMesh } from './components/Viewer';
 import { PrinterPanel } from './components/PrinterPanel';
 import { FilamentPanel } from './components/FilamentPanel';
 import { TransformPanel } from './components/TransformPanel';
 import { SettingsPanel } from './components/SettingsPanel';
+import { SplitPanel } from './components/SplitPanel';
 import { ResultPanel } from './components/ResultPanel';
 import { Section } from './components/fields';
 
@@ -30,6 +34,8 @@ interface LoadedModel {
   name: string;
   source: TriangleSoup;
 }
+
+type View = 'model' | 'plates' | 'layers';
 
 const LEGEND: [keyof typeof KIND_COLORS, string][] = [
   ['outer-wall', 'Outer wall'],
@@ -39,6 +45,13 @@ const LEGEND: [keyof typeof KIND_COLORS, string][] = [
   ['support', 'Support'],
   ['skirt', 'Skirt / brim'],
 ];
+
+const MODEL_COLOR = 0x3b82f6;
+const ERROR_COLOR = 0xef4444;
+/** Distinct colours for split parts. */
+const PART_COLORS = [0x3b82f6, 0xf59e0b, 0x10b981, 0xec4899, 0x8b5cf6, 0x06b6d4, 0xef4444, 0x84cc16, 0xf97316, 0x6366f1];
+/** Gap between parts in the exploded view, in mm. */
+const EXPLODE = 12;
 
 const toCss = ([r, g, b]: [number, number, number]) => `rgb(${r * 255}, ${g * 255}, ${b * 255})`;
 
@@ -78,12 +91,32 @@ export default function App() {
 
   const placed = useMemo(() => (model ? placeOnBed(model.source, transform, printer) : null), [model, transform, printer]);
   const bounds = useMemo(() => (placed ? computeBounds(placed) : null), [placed]);
-  const size = bounds ? boundsSize(bounds) : ([0, 0, 0] as [number, number, number]);
+  const size = useMemo(() => (bounds ? boundsSize(bounds) : ([0, 0, 0] as [number, number, number])), [bounds]);
   const fitProblems = bounds ? checkFits(bounds, printer) : [];
+
+  // ── Splitting ───────────────────────────────────────────────────────────
+  const [splitOn, setSplitOn] = useState(false);
+  const [manualCuts, setManualCuts] = useState<Cuts | null>(null);
+  const [dowels, setDowels] = useState<DowelOptions>(() => ({ ...DEFAULT_DOWELS, ...loadJSON('dowels', {}) }));
+  const [autoOrient, setAutoOrient] = useState(() => loadJSON('autoOrient', true));
+  useEffect(() => saveJSON('dowels', dowels), [dowels]);
+  useEffect(() => saveJSON('autoOrient', autoOrient), [autoOrient]);
+
+  const cuts = useMemo(
+    () => manualCuts ?? autoCuts(size, printer, settings, dowels),
+    [manualCuts, size, printer, settings, dowels],
+  );
+  const splitOpts = useMemo<SplitOptions | null>(
+    () => (splitOn && placed ? { cuts, dowels, autoOrient, printer, settings } : null),
+    [splitOn, placed, cuts, dowels, autoOrient, printer, settings],
+  );
+  const split = useSplit(splitOn ? placed : null, splitOpts);
+  const splitResult = splitOn ? split.result : null;
 
   const openModel = useCallback((name: string, source: TriangleSoup) => {
     setModel({ name, source });
     setTransform(IDENTITY_TRANSFORM);
+    setManualCuts(null);
     setLoadError(null);
   }, []);
 
@@ -104,46 +137,129 @@ export default function App() {
     const unscaled = boundsSize(computeBounds(placeOnBed(model.source, { ...transform, scale: [1, 1, 1] }, printer)));
     const f = fitScale(unscaled, printer);
     setTransform({ ...transform, scale: [f, f, f], offset: [0, 0] });
+    setManualCuts(null);
+  };
+
+  const enableSplit = (v: boolean) => {
+    setSplitOn(v);
+    // Split parts are laid on a cut face, but a few overhangs usually remain.
+    if (v && !settings.supports) setSettings((s) => ({ ...s, supports: true }));
   };
 
   // ── Slicing ─────────────────────────────────────────────────────────────
   const slicer = useSlicer();
-  const [mode, setMode] = useState<'model' | 'preview'>('model');
+  const [view, setView] = useState<View>('model');
+  const [plateIndex, setPlateIndex] = useState(0);
   const [layer, setLayer] = useState(0);
   const { clear } = slicer;
+
+  const plates = useMemo(() => {
+    if (!placed) return [];
+    if (splitOn) return splitResult ? splitResult.plates.map(plateSoup) : [];
+    return [placed];
+  }, [placed, splitOn, splitResult]);
+  const plateCount = plates.length;
 
   // Any change to the inputs makes the previous result stale.
   useEffect(() => {
     clear();
-    setMode('model');
-  }, [placed, settings, filament, printer, clear]);
+    setView((v) => (v === 'layers' ? (splitOn ? 'plates' : 'model') : v === 'plates' && !splitOn ? 'model' : v));
+  }, [plates, settings, filament, printer, clear, splitOn]);
 
   useEffect(() => {
-    if (slicer.result) {
-      setLayer(slicer.result.stats.layerCount - 1);
-      setMode('preview');
-    }
-  }, [slicer.result]);
+    if (plateIndex >= Math.max(1, plateCount)) setPlateIndex(0);
+  }, [plateCount, plateIndex]);
 
+  const results = slicer.results;
+  const current = results?.[plateIndex] ?? null;
+
+  useEffect(() => {
+    if (results) setView('layers');
+  }, [results]);
+  useEffect(() => {
+    if (current) setLayer(current.stats.layerCount - 1);
+  }, [current]);
+
+  const canSlice = !!model && plateCount > 0 && !(splitOn && split.busy);
   const startSlice = () => {
-    if (!placed || !model) return;
-    slicer.run({ positions: placed, printer, filament, settings, modelName: model.name });
+    if (!canSlice || !model) return;
+    slicer.run({ plates, printer, filament, settings, modelName: model.name });
   };
 
   const download = () => {
-    if (!slicer.result || !model) return;
+    if (!results || !model) return;
     const base = model.name.replace(/\.[^.]+$/, '').replace(/[^\w-]+/g, '_') || 'model';
-    const blob = new Blob([slicer.result.gcode], { type: 'text/x-gcode' });
+    const stem = `${base}_${printer.id}_${filament.id}`;
+    let blob: Blob, name: string;
+    if (results.length === 1) {
+      blob = new Blob([results[0].gcode], { type: 'text/x-gcode' });
+      name = `${stem}.gcode`;
+    } else {
+      const files: Record<string, Uint8Array> = {};
+      results.forEach((r, i) => (files[`${stem}_plate${i + 1}of${results.length}.gcode`] = strToU8(r.gcode)));
+      const zipped = zipSync(files, { level: 6 });
+      blob = new Blob([zipped.buffer as ArrayBuffer], { type: 'application/zip' });
+      name = `${stem}_${results.length}-plates.zip`;
+    }
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${base}_${printer.id}_${filament.id}.gcode`;
+    a.download = name;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
-  const layerCount = slicer.result?.stats.layerCount ?? 0;
-  const layerZ = slicer.result?.preview.layerZ[layer];
+  // ── What the 3D view shows ──────────────────────────────────────────────
+  const meshes = useMemo<ViewerMesh[]>(() => {
+    if (!placed) return [];
+    if (!splitOn) return [{ positions: placed, color: fitProblems.length ? ERROR_COLOR : MODEL_COLOR }];
+    if (!splitResult) return [{ positions: placed, color: MODEL_COLOR }];
+    const color = (i: number) => (splitResult.parts[i].fits ? PART_COLORS[i % PART_COLORS.length] : ERROR_COLOR);
+    if (view === 'plates' || view === 'layers') {
+      const plate = splitResult.plates[plateIndex] ?? splitResult.plates[0];
+      return plate ? plate.parts.map((p) => ({ positions: p.positions, color: color(p.part) })) : [];
+    }
+    // Exploded view: pull the parts apart a little so the cuts are visible.
+    const counts = splitResult.cuts.map((c) => c.length + 1);
+    return splitResult.parts.map((p, i) => {
+      const off = [0, 1].map((a) => (p.cell[a] - (counts[a] - 1) / 2) * EXPLODE);
+      const out = new Float32Array(p.positions.length);
+      for (let k = 0; k < out.length; k += 3) {
+        out[k] = p.positions[k] + off[0];
+        out[k + 1] = p.positions[k + 1] + off[1];
+        out[k + 2] = p.positions[k + 2] + p.cell[2] * EXPLODE; // keep the bottom row on the bed
+      }
+      return { positions: out, color: color(i) };
+    });
+  }, [placed, splitOn, splitResult, view, plateIndex, fitProblems.length]);
+
+  const planes = useMemo<CutPlane[]>(() => {
+    if (!splitResult || !bounds || view !== 'model') return [];
+    const counts = splitResult.cuts.map((c) => c.length + 1);
+    const lift = ((counts[2] - 1) / 2) * EXPLODE;
+    const min = [0, 1, 2].map((a) => bounds.min[a] - ((counts[a] - 1) / 2) * EXPLODE) as [number, number, number];
+    const max = [0, 1, 2].map((a) => bounds.max[a] + ((counts[a] - 1) / 2) * EXPLODE) as [number, number, number];
+    min[2] += lift;
+    max[2] += lift;
+    return splitResult.cuts.flatMap((list, a) =>
+      list.map((value, k) => ({
+        axis: a as 0 | 1 | 2,
+        value: value + (k + 0.5 - (counts[a] - 1) / 2) * EXPLODE + (a === 2 ? lift : 0),
+        min,
+        max,
+      })),
+    );
+  }, [splitResult, bounds, view]);
+
+  const layerCount = current?.stats.layerCount ?? 0;
+  const layerZ = current?.preview.layerZ[layer];
+  const showPlatePicker = plateCount > 1 && (view === 'plates' || view === 'layers');
+  const tabs: [View, string][] = splitOn ? [['model', 'Parts'], ['plates', 'Plates'], ['layers', 'Layers']] : [['model', 'Model'], ['layers', 'Layers']];
+  const visibleTabs = tabs.filter(([v]) => v !== 'layers' || !!results);
+  // Split parts are checked per plate; the whole model only matters when not splitting.
+  const warnings = [...(splitOn ? [] : fitProblems), ...(results?.flatMap((r) => r.warnings) ?? [])].filter(
+    (w, i, all) => all.indexOf(w) === i,
+  );
 
   return (
     <div className="app">
@@ -216,15 +332,41 @@ export default function App() {
 
           <TransformPanel
             transform={transform}
-            onChange={setTransform}
+            onChange={(t) => {
+              setTransform(t);
+              setManualCuts(null);
+            }}
             size={size}
             uniform={uniform}
             onUniformChange={setUniform}
             onFit={fitToBed}
-            onReset={() => setTransform(IDENTITY_TRANSFORM)}
+            onReset={() => {
+              setTransform(IDENTITY_TRANSFORM);
+              setManualCuts(null);
+            }}
           />
 
           <SettingsPanel settings={settings} onChange={setSettings} />
+
+          <SplitPanel
+            enabled={splitOn}
+            onEnabledChange={enableSplit}
+            tooBig={fitProblems.length > 0}
+            cuts={cuts}
+            manual={!!manualCuts}
+            onCutsChange={setManualCuts}
+            onAuto={() => setManualCuts(null)}
+            size={size}
+            dowels={dowels}
+            onDowelsChange={setDowels}
+            autoOrient={autoOrient}
+            onAutoOrientChange={setAutoOrient}
+            supports={settings.supports}
+            onSupportsChange={(v) => setSettings((s) => ({ ...s, supports: v }))}
+            result={splitResult}
+            busy={split.busy}
+            error={splitOn ? split.error : null}
+          />
         </aside>
 
         <section
@@ -242,11 +384,12 @@ export default function App() {
         >
           <Viewer
             printer={printer}
-            mesh={placed}
-            preview={slicer.result?.preview ?? null}
-            mode={mode}
+            meshes={meshes}
+            planes={planes}
+            preview={view === 'layers' ? current?.preview ?? null : null}
+            mode={view === 'layers' ? 'preview' : 'model'}
             layer={layer}
-            outOfBounds={fitProblems.length > 0}
+            frameKey={`${model?.name}|${view}|${plateIndex}|${splitOn && !!splitResult}|${transform.scale.join()}`}
           />
 
           {!model && (
@@ -256,14 +399,26 @@ export default function App() {
             </div>
           )}
 
-          {slicer.result && (
-            <div className="view-toggle" role="tablist">
-              <button role="tab" aria-selected={mode === 'model'} className={mode === 'model' ? 'on' : ''} onClick={() => setMode('model')}>Model</button>
-              <button role="tab" aria-selected={mode === 'preview'} className={mode === 'preview' ? 'on' : ''} onClick={() => setMode('preview')}>Layers</button>
-            </div>
-          )}
+          <div className="stage-top">
+            {model && visibleTabs.length > 1 && (
+              <div className="view-toggle" role="tablist">
+                {visibleTabs.map(([v, label]) => (
+                  <button key={v} role="tab" aria-selected={view === v} className={view === v ? 'on' : ''} onClick={() => setView(v)}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+            {showPlatePicker && (
+              <div className="plate-picker">
+                <button aria-label="Previous plate" onClick={() => setPlateIndex((i) => (i - 1 + plateCount) % plateCount)}>‹</button>
+                <span>Plate {plateIndex + 1} / {plateCount}</span>
+                <button aria-label="Next plate" onClick={() => setPlateIndex((i) => (i + 1) % plateCount)}>›</button>
+              </div>
+            )}
+          </div>
 
-          {mode === 'preview' && slicer.result && (
+          {view === 'layers' && current && (
             <>
               <div className="layer-slider">
                 <span className="small">Layer {layer + 1} / {layerCount}{layerZ !== undefined && ` · ${layerZ.toFixed(2)} mm`}</span>
@@ -285,10 +440,12 @@ export default function App() {
           )}
 
           <div className="action-bar">
-            {fitProblems.map((p) => <p key={p} className="error small">{p}</p>)}
-            {slicer.result?.warnings
-              .filter((w) => !fitProblems.includes(w))
-              .map((w) => <p key={w} className="warning small">{w}</p>)}
+            {warnings.map((w) => (
+              <p key={w} className={fitProblems.includes(w) ? 'error small' : 'warning small'}>{w}</p>
+            ))}
+            {!splitOn && fitProblems.length > 0 && (
+              <button className="btn ghost small" onClick={() => enableSplit(true)}>Split it into parts that fit</button>
+            )}
             {slicer.error && <p className="error small">Slicing failed: {slicer.error}</p>}
 
             {slicer.busy ? (
@@ -297,11 +454,11 @@ export default function App() {
                 <span className="small">{slicer.stage}… {Math.round(slicer.progress * 100)}%</span>
                 <button className="btn ghost small" onClick={slicer.cancel}>Cancel</button>
               </div>
-            ) : slicer.result ? (
-              <ResultPanel result={slicer.result} onDownload={download} />
+            ) : results ? (
+              <ResultPanel results={results} plate={plateIndex} onDownload={download} />
             ) : (
-              <button className="btn primary wide big" disabled={!model} onClick={startSlice}>
-                {model ? 'Slice' : 'Load a model to slice'}
+              <button className="btn primary wide big" disabled={!canSlice} onClick={startSlice}>
+                {!model ? 'Load a model to slice' : splitOn && split.busy ? 'Splitting…' : plateCount > 1 ? `Slice ${plateCount} plates` : 'Slice'}
               </button>
             )}
           </div>

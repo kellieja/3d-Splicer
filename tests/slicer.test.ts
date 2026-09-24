@@ -51,6 +51,12 @@ describe('slicing', () => {
     }
   });
 
+  it('slices through a plane that passes exactly through vertices', () => {
+    // z = 30 is the ring where the cylinder meets the cone.
+    const [region] = sliceMesh(makeSampleTower(12, 30, 64), [30]);
+    expect(Math.abs(area(region) - Math.PI * 144) / (Math.PI * 144)).toBeLessThan(0.01);
+  });
+
   it('slices a cylinder into circles', () => {
     const regions = sliceMesh(makeSampleTower(10, 20, 128), [5]);
     expect(Math.abs(area(regions[0]) - Math.PI * 100) / (Math.PI * 100)).toBeLessThan(0.01);

@@ -54,7 +54,9 @@ export function sliceMesh(positions: TriangleSoup, planes: number[]): Paths[] {
     const nx = uy * wz - uz * wy;
     const ny = uz * wx - ux * wz;
 
-    for (let p = firstPlaneAtOrAbove(zmin); p < planes.length && planes[p] < zmax; p++) {
+    // `<=`: a triangle whose top vertex lies exactly on the plane still crosses it
+    // (that vertex counts as above), so it must not be skipped.
+    for (let p = firstPlaneAtOrAbove(zmin); p < planes.length && planes[p] <= zmax; p++) {
       const z = planes[p];
       const pts: number[] = [];
       for (let e = 0; e < 3; e++) {
@@ -71,6 +73,8 @@ export function sliceMesh(positions: TriangleSoup, planes: number[]): Paths[] {
       }
       if (pts.length !== 4) continue;
       let [ax, ay, bx, by] = pts;
+      // A triangle touching the plane with just one vertex gives a zero-length segment.
+      if (Math.abs(ax - bx) < 1e-7 && Math.abs(ay - by) < 1e-7) continue;
       if ((bx - ax) * -ny + (by - ay) * nx < 0) [ax, ay, bx, by] = [bx, by, ax, ay];
       segs[p].push({ ax, ay, bx, by });
     }
