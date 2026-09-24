@@ -10,5 +10,6 @@ export default defineConfig({
   worker: { format: 'es' },
   // three.js alone is ~700 kB; that's expected for a 3D app.
   build: { chunkSizeWarningLimit: 1200 },
-  test: { environment: 'node', include: ['tests/**/*.test.ts'] },
+  // Full slicing runs (e.g. a 300 mm cube) take a few seconds and can pass 5 s on shared CI runners.
+  test: { environment: 'node', include: ['tests/**/*.test.ts'], testTimeout: 30000 },
 });
