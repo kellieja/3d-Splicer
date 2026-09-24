@@ -29,6 +29,7 @@
   "homepage": "https://kellieja.github.io/3d-splicer/",
   "dependencies": {
     "clipper-lib": "^6.4.2",
+    "fflate": "^0.8.3",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "three": "^0.186.1"
