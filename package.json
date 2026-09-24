@@ -1,0 +1,48 @@
+{
+  "name": "3d-splicer",
+  "version": "0.1.0",
+  "description": "Open-source, in-browser 3D printing slicer for FDM printers",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -b"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kellieja/3d-splicer.git"
+  },
+  "keywords": [
+    "3d-printing",
+    "slicer",
+    "gcode",
+    "fdm",
+    "three.js"
+  ],
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/kellieja/3d-splicer/issues"
+  },
+  "homepage": "https://kellieja.github.io/3d-splicer/",
+  "dependencies": {
+    "clipper-lib": "^6.4.2",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@types/clipper-lib": "^6.4.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/three": "^0.186.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.1"
+  },
+  "private": true,
+  "type": "module"
+}
