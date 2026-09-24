@@ -8,7 +8,8 @@ import type {
   SliceResult,
 } from '../types';
 import { computeBounds, checkFits, type TriangleSoup } from './mesh';
-import { layerHeights, sliceMesh } from './slice';
+import { sliceMesh } from './slice';
+import { computeLayerHeights } from './layers';
 import { generateToolpaths } from './toolpaths';
 import { generateGcode } from './gcode';
 
@@ -52,7 +53,7 @@ export function slice(req: SliceRequest, onProgress: ProgressFn = () => {}): Sli
   warnings.push(...checkFits(bounds, req.printer));
 
   const lw = lineWidthFor(settings);
-  const zs = layerHeights(bounds.max[2], settings.firstLayerHeight, settings.layerHeight);
+  const zs = computeLayerHeights(positions, bounds.max[2], settings);
   // Slice through the middle of every layer.
   const planes = zs.map((z, i) => (i === 0 ? z / 2 : z - (z - zs[i - 1]) / 2));
 
@@ -89,6 +90,7 @@ export const KIND_COLORS: Record<PathKind, [number, number, number]> = {
   'sparse-infill': [0.55, 0.36, 0.9],
   support: [0.3, 0.75, 0.9],
   skirt: [0.4, 0.85, 0.5],
+  ironing: [0.9, 0.95, 1],
 };
 
 export function buildPreview(layers: Layer[]): PreviewData {

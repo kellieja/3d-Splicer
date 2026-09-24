@@ -1,4 +1,4 @@
-import type { Cuts, DowelOptions, SplitResult } from '../slicer/split';
+import type { Cuts, CutTilts, DowelOptions, SplitResult } from '../slicer/split';
 import { NumberField, Section, Toggle } from './fields';
 
 interface Props {
@@ -13,6 +13,9 @@ interface Props {
   minimumPieces: number;
   /** Cut positions measured from the model's minimum corner. */
   cuts: Cuts;
+  /** Tilt of each cut in degrees, lined up with `cuts`. */
+  tilts: CutTilts;
+  onTiltsChange: (t: CutTilts) => void;
   manual: boolean;
   onCutsChange: (c: Cuts) => void;
   size: [number, number, number];
@@ -26,10 +29,13 @@ interface Props {
   busy: boolean;
   error: string | null;
   onDownloadStl: () => void;
+  onDownloadGuide: () => void;
 }
 
 const AXES = ['X', 'Y', 'Z'] as const;
 const AXIS_HINT = ['left → right', 'front → back', 'bottom → top'];
+/** The two axes a cut across each axis can tilt around (matches the cutter's plane frames). */
+const TILT_AXES = [['Y', 'Z'], ['Z', 'X'], ['X', 'Y']];
 
 export function SplitPanel(p: Props) {
   const r = p.result;
@@ -43,6 +49,10 @@ export function SplitPanel(p: Props) {
   /** Re-spaces the cuts on one axis evenly for the given number of parts. */
   const setCount = (a: number, parts: number) => {
     const n = Math.max(1, Math.min(20, parts));
+    // Re-spaced cuts start straight again.
+    const t = p.tilts.map((l) => [...l]) as CutTilts;
+    t[a] = Array.from({ length: n - 1 }, () => [0, 0] as [number, number]);
+    p.onTiltsChange(t);
     setAxis(a, Array.from({ length: n - 1 }, (_, k) => +(((k + 1) * p.size[a]) / n).toFixed(1)));
   };
 
@@ -127,13 +137,20 @@ export function SplitPanel(p: Props) {
           {p.error && <p className="error small">Splitting failed: {p.error}</p>}
           {r?.warnings.map((w) => <p key={w} className="warning small">{w}</p>)}
 
-          <button className="btn wide" disabled={!r || p.busy} onClick={p.onDownloadStl}>
-            Download pieces as STL (.zip)
-          </button>
+          <div className="row">
+            <button className="btn" disabled={!r || p.busy} onClick={p.onDownloadStl}>
+              Download pieces as STL (.zip)
+            </button>
+            <button className="btn" disabled={!r || p.busy} onClick={p.onDownloadGuide}>
+              Assembly guide (PDF)
+            </button>
+          </div>
 
           <details className="subsection" open={p.manual}>
             <summary>Adjust cuts</summary>
-            <p className="muted small">Move cuts away from fine details, or choose how many pieces in each direction.</p>
+            <p className="muted small">
+              Move cuts away from fine details, choose how many pieces in each direction, or tilt a cut (up to 60°).
+            </p>
             {AXES.map((axis, a) => (
               <div key={axis} className="cut-axis">
                 <div className="row between">
@@ -144,11 +161,17 @@ export function SplitPanel(p: Props) {
                     <button className="btn ghost small" aria-label={`More ${axis} pieces`} onClick={() => setCount(a, p.cuts[a].length + 2)}>+</button>
                   </div>
                 </div>
-                {p.cuts[a].length > 0 && (
-                  <div className="grid3">
-                    {p.cuts[a].map((c, i) => (
+                {p.cuts[a].map((c, i) => {
+                  const tilt = p.tilts[a]?.[i] ?? [0, 0];
+                  const setTilt = (k: 0 | 1, deg: number) => {
+                    const t = p.tilts.map((l) => l.map((x) => [...x] as [number, number])) as CutTilts;
+                    t[a][i] = [...tilt] as [number, number];
+                    t[a][i][k] = deg;
+                    p.onTiltsChange(t);
+                  };
+                  return (
+                    <div key={i} className="grid3">
                       <NumberField
-                        key={i}
                         label={`Cut ${i + 1}`}
                         unit="mm"
                         step={1}
@@ -157,9 +180,11 @@ export function SplitPanel(p: Props) {
                         value={c}
                         onChange={(v) => setAxis(a, p.cuts[a].map((x, j) => (j === i ? v : x)))}
                       />
-                    ))}
-                  </div>
-                )}
+                      <NumberField label={`Tilt around ${TILT_AXES[a][0]}`} unit="°" step={5} min={-60} max={60} hint="Angle the cut, e.g. to follow a slope or hide the seam" value={tilt[0]} onChange={(v) => setTilt(0, v)} />
+                      <NumberField label={`Tilt around ${TILT_AXES[a][1]}`} unit="°" step={5} min={-60} max={60} value={tilt[1]} onChange={(v) => setTilt(1, v)} />
+                    </div>
+                  );
+                })}
               </div>
             ))}
           </details>

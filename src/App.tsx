@@ -16,8 +16,12 @@ import {
   type TriangleSoup,
 } from './slicer/mesh';
 import { KIND_COLORS } from './slicer';
-import { autoCuts, cutsForPieceCount, DEFAULT_DOWELS, plateSoup, type Cuts, type DowelOptions, type SplitOptions } from './slicer/split';
+import { computeLayerHeights } from './slicer/layers';
+import { autoCuts, cutsForPieceCount, DEFAULT_DOWELS, plateSoup, type Cuts, type CutTilts, type DowelOptions, type SplitOptions } from './slicer/split';
 import { toBinaryStl } from './lib/stl';
+import { loadProject, PROJECT_EXTENSION, saveProject, type ProjectState } from './lib/project';
+import { buildSlicerProject } from './lib/exportProject';
+import { buildGuidePdf, guidePieces, renderGuidePicture } from './lib/assemblyGuide';
 import { loadModelFile, SUPPORTED_EXTENSIONS } from './lib/loaders';
 import { loadJSON, saveJSON } from './lib/storage';
 import { useSlicer } from './lib/useSlicer';
@@ -45,6 +49,7 @@ const LEGEND: [keyof typeof KIND_COLORS, string][] = [
   ['sparse-infill', 'Infill'],
   ['support', 'Support'],
   ['skirt', 'Skirt / brim'],
+  ['ironing', 'Ironing'],
 ];
 
 const MODEL_COLOR = 0x3b82f6;
@@ -55,6 +60,11 @@ const PART_COLORS = [0x3b82f6, 0xf59e0b, 0x10b981, 0xec4899, 0x8b5cf6, 0x06b6d4,
 const EXPLODE = 12;
 
 const toCss = ([r, g, b]: [number, number, number]) => `rgb(${r * 255}, ${g * 255}, ${b * 255})`;
+
+/** Tilts lined up with the current cuts (missing ones are straight). */
+function tiltsFor(cuts: Cuts, tilts: CutTilts | null): CutTilts {
+  return cuts.map((list, a) => list.map((_, i) => tilts?.[a]?.[i] ?? [0, 0])) as CutTilts;
+}
 
 function saveBlob(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);
@@ -103,11 +113,25 @@ export default function App() {
   const bounds = useMemo(() => (placed ? computeBounds(placed) : null), [placed]);
   const size = useMemo(() => (bounds ? boundsSize(bounds) : ([0, 0, 0] as [number, number, number])), [bounds]);
   const fitProblems = bounds ? checkFits(bounds, printer) : [];
+  // Preview of variable layer heights for the whole model.
+  const layerInfo = useMemo(() => {
+    if (!placed || !bounds || (!settings.adaptiveLayers && !(settings.layerRanges ?? []).length)) return null;
+    const zs = computeLayerHeights(placed, bounds.max[2], settings);
+    const hs = zs.map((z, i) => (i ? z - zs[i - 1] : z));
+    return { count: zs.length, min: Math.min(...hs), max: Math.max(...hs) };
+  }, [placed, bounds, settings]);
 
   // ── Splitting ───────────────────────────────────────────────────────────
   const [splitOn, setSplitOn] = useState(false);
   const [manualCuts, setManualCuts] = useState<Cuts | null>(null);
   const [pieces, setPieces] = useState<number | null>(null);
+  const [tilts, setTilts] = useState<CutTilts | null>(null);
+  // Tilts belong to your own cuts: going back to automatic cuts straightens them.
+  const hadManualCuts = useRef(false);
+  useEffect(() => {
+    if (hadManualCuts.current && !manualCuts) setTilts(null);
+    hadManualCuts.current = !!manualCuts;
+  }, [manualCuts]);
   const [dowels, setDowels] = useState<DowelOptions>(() => ({ ...DEFAULT_DOWELS, ...loadJSON('dowels', {}) }));
   const [autoOrient, setAutoOrient] = useState(() => loadJSON('autoOrient', true));
   useEffect(() => saveJSON('dowels', dowels), [dowels]);
@@ -124,8 +148,8 @@ export default function App() {
     [manualCuts, pieces, size, printer, settings, dowels],
   );
   const splitOpts = useMemo<SplitOptions | null>(
-    () => (splitOn && placed ? { cuts, dowels, autoOrient, printer, settings } : null),
-    [splitOn, placed, cuts, dowels, autoOrient, printer, settings],
+    () => (splitOn && placed ? { cuts, tilts: tiltsFor(cuts, tilts), dowels, autoOrient, printer, settings } : null),
+    [splitOn, placed, cuts, tilts, dowels, autoOrient, printer, settings],
   );
   const split = useSplit(splitOn ? placed : null, splitOpts);
   const splitResult = splitOn ? split.result : null;
@@ -138,17 +162,54 @@ export default function App() {
     setLoadError(null);
   }, []);
 
-  const handleFile = useCallback(
-    async (file: File | undefined) => {
-      if (!file) return;
-      try {
+  /** Restores everything from a saved .splicer project. */
+  const applyProject = (source: TriangleSoup, st: ProjectState) => {
+    const builtinPrinter = BUILTIN_PRINTERS.find((p) => p.id === st.printer.id);
+    if (builtinPrinter && JSON.stringify(builtinPrinter) === JSON.stringify(st.printer)) {
+      setPrinterId(builtinPrinter.id);
+    } else {
+      // A custom or edited printer comes back as one of "My printers".
+      const saved: PrinterProfile = builtinPrinter
+        ? { ...st.printer, id: `${st.printer.id}-saved`, manufacturer: 'My printers', name: `${st.printer.name} (from project)`, custom: true }
+        : { ...st.printer, custom: true };
+      setCustomPrinters((list) => [...list.filter((x) => x.id !== saved.id), saved]);
+      setPrinterId(saved.id);
+    }
+    const base = BUILTIN_FILAMENTS.find((f) => f.id === st.filament.id) ?? BUILTIN_FILAMENTS.find((f) => f.material === st.filament.material) ?? BUILTIN_FILAMENTS[0];
+    setFilamentId(base.id);
+    setFilamentEdits((e) => {
+      const next = { ...e };
+      const f = { ...st.filament, id: base.id };
+      if (JSON.stringify(f) === JSON.stringify(base)) delete next[base.id];
+      else next[base.id] = f;
+      return next;
+    });
+    setSettings({ ...DEFAULT_SETTINGS, ...st.settings });
+    setModel({ name: st.modelName, source });
+    setTransform(st.transform);
+    setUniform(st.uniform);
+    setSplitOn(st.split.enabled);
+    setPieces(st.split.pieces);
+    setManualCuts(st.split.manualCuts);
+    setTilts(st.split.tilts ?? null);
+    setDowels({ ...DEFAULT_DOWELS, ...st.split.dowels });
+    setAutoOrient(st.split.autoOrient);
+    setLoadError(null);
+  };
+
+  const handleFile = async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      if (file.name.toLowerCase().endsWith(PROJECT_EXTENSION)) {
+        const { model: source, state: st } = loadProject(new Uint8Array(await file.arrayBuffer()));
+        applyProject(source, st);
+      } else {
         openModel(file.name, await loadModelFile(file));
-      } catch (err) {
-        setLoadError(err instanceof Error ? err.message : String(err));
       }
-    },
-    [openModel],
-  );
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   const fitToBed = () => {
     if (!model) return;
@@ -217,6 +278,57 @@ export default function App() {
       }),
     );
     saveBlob(new Blob([zipSync(files, { level: 6 }).buffer as ArrayBuffer], { type: 'application/zip' }), `${base}_${splitResult.parts.length}-pieces_stl.zip`);
+  };
+
+  const [guideError, setGuideError] = useState<string | null>(null);
+  const downloadGuide = async () => {
+    if (!splitResult || !model) return;
+    try {
+      setGuideError(null);
+      const colors = splitResult.parts.map((_, i) => PART_COLORS[i % PART_COLORS.length]);
+      const picture = await renderGuidePicture(splitResult, colors, EXPLODE * 2.5);
+      const pdf = buildGuidePdf(
+        {
+          title: model.name,
+          lines: [
+            `${splitResult.parts.length} pieces on ${splitResult.plates.length} plate${splitResult.plates.length === 1 ? '' : 's'}, ${splitResult.dowels} dowel pins`,
+            `Printer: ${printer.manufacturer} ${printer.name}. Filament: ${filament.name}.`,
+            `Model size: ${size.map((v) => v.toFixed(0)).join(' x ')} mm`,
+          ],
+          pieces: guidePieces(splitResult, colors),
+        },
+        picture,
+      );
+      saveBlob(new Blob([pdf.buffer as ArrayBuffer], { type: 'application/pdf' }), `${baseName}_assembly-guide.pdf`);
+    } catch (err) {
+      setGuideError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const baseName = (model?.name ?? 'model').replace(/\.[^.]+$/, '').replace(/[^\w-]+/g, '_') || 'model';
+
+  const saveProjectFile = () => {
+    if (!model) return;
+    const bytes = saveProject(model.source, {
+      modelName: model.name,
+      printer,
+      filament,
+      settings,
+      transform,
+      uniform,
+      split: { enabled: splitOn, pieces, manualCuts, tilts, dowels, autoOrient },
+    });
+    saveBlob(new Blob([bytes.buffer as ArrayBuffer], { type: 'application/zip' }), `${baseName}${PROJECT_EXTENSION}`);
+  };
+
+  const canExport = !!placed && (!splitOn || (!!splitResult && !split.busy));
+  const exportForSlicers = () => {
+    if (!placed || !model || !canExport) return;
+    const platesOut = splitOn && splitResult
+      ? splitResult.plates.map((pl) => pl.parts.map((pp) => ({ name: `Piece ${pp.part + 1}`, positions: pp.positions })))
+      : [[{ name: model.name.replace(/\.[^.]+$/, ''), positions: placed }]];
+    const bytes = buildSlicerProject({ modelName: model.name, original: placed, plates: platesOut, printer, filament, settings });
+    saveBlob(new Blob([bytes.buffer as ArrayBuffer], { type: 'application/zip' }), `${baseName}_project_${platesOut.length}-plate${platesOut.length === 1 ? '' : 's'}.zip`);
   };
 
   const download = () => {
@@ -293,19 +405,17 @@ export default function App() {
   const planes = useMemo<CutPlane[]>(() => {
     if (!splitResult || !bounds || view !== 'model') return [];
     const counts = splitResult.cuts.map((c) => c.length + 1);
-    const lift = ((counts[2] - 1) / 2) * EXPLODE;
-    const min = [0, 1, 2].map((a) => bounds.min[a] - ((counts[a] - 1) / 2) * EXPLODE) as [number, number, number];
-    const max = [0, 1, 2].map((a) => bounds.max[a] + ((counts[a] - 1) / 2) * EXPLODE) as [number, number, number];
-    min[2] += lift;
-    max[2] += lift;
-    return splitResult.cuts.flatMap((list, a) =>
-      list.map((value, k) => ({
-        axis: a as 0 | 1 | 2,
-        value: value + (k + 0.5 - (counts[a] - 1) / 2) * EXPLODE + (a === 2 ? lift : 0),
-        min,
-        max,
-      })),
-    );
+    const extent = Math.max(...[0, 1, 2].map((a) => bounds.max[a] - bounds.min[a] + (counts[a] - 1) * EXPLODE));
+    const seen = [0, 0, 0];
+    // Move each plane into the gap between the pulled-apart pieces.
+    return splitResult.planes.map((f) => {
+      const k = seen[f.axis]++;
+      const shift = f.axis === 2 ? (k + 0.5) * EXPLODE : (k + 0.5 - (counts[f.axis] - 1) / 2) * EXPLODE;
+      const point = [...f.point] as [number, number, number];
+      point[f.axis] += shift;
+      if (f.axis !== 2) point[2] += ((counts[2] - 1) / 2) * EXPLODE;
+      return { normal: f.n, point, size: extent * 1.15 };
+    });
   }, [splitResult, bounds, view]);
 
   const layerCount = current?.stats.layerCount ?? 0;
@@ -343,14 +453,17 @@ export default function App() {
             <input
               ref={fileInput}
               type="file"
-              accept={SUPPORTED_EXTENSIONS.join(',')}
+              accept={[...SUPPORTED_EXTENSIONS, PROJECT_EXTENSION].join(',')}
               hidden
               onChange={(e) => {
                 handleFile(e.target.files?.[0]);
                 e.target.value = '';
               }}
             />
-            <p className="muted small">STL, OBJ or 3MF. Your file never leaves your computer: slicing runs in your browser.</p>
+            <p className="muted small">
+              STL, OBJ or 3MF, or a saved 3D Splicer project ({PROJECT_EXTENSION}). Your file never leaves your computer:
+              slicing runs in your browser.
+            </p>
             <div className="row">
               <button className="btn ghost small" onClick={() => openModel('calibration-cube.stl', makeCube(20))}>Sample: 20 mm cube</button>
               <button className="btn ghost small" onClick={() => openModel('sample-tower.stl', makeSampleTower())}>Sample: tower</button>
@@ -405,7 +518,7 @@ export default function App() {
             }}
           />
 
-          <SettingsPanel settings={settings} onChange={setSettings} />
+          <SettingsPanel settings={settings} onChange={setSettings} layerInfo={layerInfo} />
 
           <SplitPanel
             enabled={splitOn}
@@ -418,9 +531,15 @@ export default function App() {
             }}
             minimumPieces={minimumPieces}
             cuts={cuts}
+            tilts={tiltsFor(cuts, tilts)}
+            onTiltsChange={(t) => {
+              if (!manualCuts) setManualCuts(cuts);
+              setTilts(t);
+            }}
             manual={!!manualCuts}
             onCutsChange={setManualCuts}
             onDownloadStl={downloadStl}
+            onDownloadGuide={downloadGuide}
             size={size}
             dowels={dowels}
             onDowelsChange={setDowels}
@@ -432,6 +551,22 @@ export default function App() {
             busy={split.busy}
             error={splitOn ? split.error : null}
           />
+
+          <Section title="6. Save & export" defaultOpen={!!model}>
+            <button className="btn primary wide" disabled={!canExport} onClick={exportForSlicers}>
+              Export project for other slicers (.zip)
+            </button>
+            <p className="muted small">
+              {splitOn ? 'Every plate' : 'Your model'} as a 3MF project, plus your printer, filament and print settings, with
+              supports <strong>off</strong> so you can add your own. Opens in Bambu Studio, OrcaSlicer, PrusaSlicer, Cura,
+              Creality Print and other slicers: see “HOW TO OPEN.txt” inside.
+            </p>
+            <div className="row">
+              <button className="btn" disabled={!model} onClick={saveProjectFile}>Save project ({PROJECT_EXTENSION})</button>
+              <button className="btn ghost" onClick={() => fileInput.current?.click()}>Open project…</button>
+            </div>
+            <p className="muted small">A 3D Splicer project keeps your model, size, printer, filament, cuts and settings so you can carry on later.</p>
+          </Section>
         </aside>
 
         <section
@@ -513,6 +648,7 @@ export default function App() {
               <button className="btn ghost small" onClick={() => enableSplit(true)}>Split it into pieces that fit</button>
             )}
             {slicer.error && <p className="error small">Slicing failed: {slicer.error}</p>}
+            {guideError && <p className="error small">Assembly guide failed: {guideError}</p>}
 
             {slicer.busy ? (
               <div className="progress">

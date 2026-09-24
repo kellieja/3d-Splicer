@@ -207,3 +207,139 @@ describe('STL export', () => {
     expect(geo.getAttribute('position').count).toBe(36);
   });
 });
+
+describe('project export', () => {
+  it('writes standard 3MF files with each piece named and in place', async () => {
+    const { build3mf } = await import('../src/lib/threemf');
+    const { unzipSync, strFromU8 } = await import('fflate');
+    const a = placeOnBed(makeCube(20), IDENTITY_TRANSFORM, ender);
+    const files = unzipSync(build3mf([{ name: 'Piece 1 & co', positions: a }], { title: 'test' }));
+    expect(Object.keys(files)).toEqual(expect.arrayContaining(['[Content_Types].xml', '_rels/.rels', '3D/3dmodel.model']));
+    const xml = strFromU8(files['3D/3dmodel.model']);
+    expect(xml).toContain('name="Piece 1 &amp; co"');
+    // 8 shared vertices and 12 triangles for a cube.
+    expect(xml.match(/<vertex /g)!.length).toBe(8);
+    expect(xml.match(/<triangle /g)!.length).toBe(12);
+    // Vertex + build transform puts the cube back where it was on the bed.
+    const t = /transform="1 0 0 0 1 0 0 0 1 ([\d.-]+) ([\d.-]+) ([\d.-]+)"/.exec(xml)!.slice(1).map(Number);
+    const xs = [...xml.matchAll(/<vertex x="([\d.-]+)" y="([\d.-]+)" z="([\d.-]+)"/g)].map((m) => [+m[1] + t[0], +m[2] + t[1], +m[3] + t[2]]);
+    const b = computeBounds(a);
+    expect(Math.min(...xs.map((v) => v[0]))).toBeCloseTo(b.min[0], 3);
+    expect(Math.max(...xs.map((v) => v[1]))).toBeCloseTo(b.max[1], 3);
+    expect(Math.min(...xs.map((v) => v[2]))).toBeCloseTo(0, 5);
+  });
+
+  it('builds a project zip that works for every slicer', async () => {
+    const { unzipSync, strFromU8 } = await import('fflate');
+    const { buildSlicerProject } = await import('../src/lib/exportProject');
+    const model = big(300);
+    const r = splitModel(model, { cuts: autoCuts([300, 300, 300], ender, settings, DEFAULT_DOWELS), dowels: DEFAULT_DOWELS, autoOrient: true, printer: ender, settings });
+    const zip = buildSlicerProject({
+      modelName: 'cube.stl',
+      original: model,
+      plates: r.plates.map((pl) => pl.parts.map((pp) => ({ name: `Piece ${pp.part + 1}`, positions: pp.positions }))),
+      printer: ender,
+      filament: pla,
+      settings,
+    });
+    const files = unzipSync(zip);
+    const names = Object.keys(files);
+    expect(names.filter((n) => /^Plate \d+\.3mf$/.test(n)).length).toBe(r.plates.length);
+    expect(names).toEqual(expect.arrayContaining(['All plates.3mf', 'Original model.3mf', 'settings.ini', 'SETTINGS.txt', 'HOW TO OPEN.txt']));
+    const ini = strFromU8(files['settings.ini']);
+    expect(ini).toContain('support_material = 0');
+    expect(ini).toContain('temperature = 210');
+    expect(ini).toContain('bed_shape = 0x0,220x0,220x220,0x220');
+    // Each plate file is a valid 3MF package with the model inside.
+    const plate = unzipSync(files['Plate 1.3mf']);
+    expect(strFromU8(plate['3D/3dmodel.model'])).toContain('<object id="1" name="Piece');
+  });
+
+  it('saves and reopens a 3D Splicer project', async () => {
+    const { saveProject, loadProject } = await import('../src/lib/project');
+    const cube = placeOnBed(makeCube(20), IDENTITY_TRANSFORM, ender);
+    const state = {
+      modelName: 'cube.stl', printer: ender, filament: pla, settings,
+      transform: { ...IDENTITY_TRANSFORM, scale: [2, 2, 2] as [number, number, number] }, uniform: true,
+      split: { enabled: true, pieces: 4, manualCuts: null, dowels: DEFAULT_DOWELS, autoOrient: true },
+    };
+    const back = loadProject(saveProject(cube, state));
+    expect(back.state).toEqual(state);
+    expect(back.model.length).toBe(cube.length);
+    expect(() => loadProject(new Uint8Array([1, 2, 3]))).toThrow(/not a 3D Splicer project/);
+  });
+});
+
+describe('angled cuts', () => {
+  const model = () => big(200);
+  const base = () => ({ dowels: DEFAULT_DOWELS, autoOrient: true, printer: ender, settings });
+
+  it('cuts along a tilted plane and keeps every part solid', () => {
+    const r = splitModel(model(), { ...base(), cuts: [[], [], [100]], tilts: [[], [], [[25, 0]]] });
+    expect(r.parts.length).toBe(2);
+    const n = r.planes[0].n;
+    expect(Math.abs(n[2])).toBeCloseTo(Math.cos((25 * Math.PI) / 180), 6);
+    let total = 0;
+    for (const p of r.parts) {
+      const v = meshVolume(p.positions);
+      expect(v).toBeGreaterThan(0);
+      total += v;
+    }
+    expect(Math.abs(total - 200 ** 3) / 200 ** 3).toBeLessThan(0.002);
+    // The joint still gets pins and matching holes.
+    expect(r.dowels).toBeGreaterThanOrEqual(2);
+    expect(r.parts[0].pins + r.parts[1].pins).toBe(r.dowels);
+    expect(r.parts[0].holes + r.parts[1].holes).toBe(r.dowels);
+    expect(r.parts[0].joins).toEqual([1]);
+    expect(r.parts[1].joins).toEqual([0]);
+  });
+
+  it('lays each piece flat, including on a tilted cut face', () => {
+    const r = splitModel(model(), { ...base(), cuts: [[], [], [100]], tilts: [[], [], [[25, 0]]] });
+    for (const plate of r.plates)
+      for (const pp of plate.parts) {
+        const b = computeBounds(pp.positions);
+        expect(b.min[2]).toBeCloseTo(0, 4);
+        const [region] = sliceMesh(pp.positions, [0.1]);
+        expect(area(region)).toBeGreaterThan(150 * 150); // big flat face on the bed
+      }
+  });
+
+  it('handles tilted cuts in several directions on a round model', () => {
+    const ball = placeOnBed(sphere(90, 96), IDENTITY_TRANSFORM, ender);
+    const r = splitModel(ball, { ...base(), cuts: [[90], [], [90]], tilts: [[[0, 20]], [], [[-15, 10]]] });
+    expect(r.parts.length).toBe(4);
+    const vol = r.parts.reduce((n, p) => n + meshVolume(p.positions), 0);
+    expect(Math.abs(vol / meshVolume(ball) - 1)).toBeLessThan(0.002);
+    for (const p of r.parts) expect(meshVolume(p.positions)).toBeGreaterThan(0);
+  });
+
+  it('zero tilt gives the same result as a straight cut', () => {
+    const a = splitModel(model(), { ...base(), cuts: [[], [], [100]] });
+    const b = splitModel(model(), { ...base(), cuts: [[], [], [100]], tilts: [[], [], [[0, 0]]] });
+    expect(b.parts.map((p) => p.positions.length)).toEqual(a.parts.map((p) => p.positions.length));
+  });
+});
+
+describe('assembly guide', () => {
+  it('builds a valid PDF listing every piece', async () => {
+    const { buildGuidePdf, guidePieces } = await import('../src/lib/assemblyGuide');
+    const r = splitModel(big(300), { cuts: autoCuts([300, 300, 300], ender, settings, DEFAULT_DOWELS), dowels: DEFAULT_DOWELS, autoOrient: true, printer: ender, settings });
+    const pieces = guidePieces(r, [0xff0000, 0x00ff00]);
+    expect(pieces.length).toBe(8);
+    expect(pieces.every((p) => p.plate >= 1 && p.joins.length === 3)).toBe(true); // each corner cube touches 3 others
+    // A tiny valid JPEG (1×1 px) stands in for the rendered picture.
+    const jpeg = Uint8Array.from(atob('/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q=='), (c) => c.charCodeAt(0));
+    const pdf = buildGuidePdf({ title: 'cube.stl', lines: ['8 pieces on 8 plates'], pieces }, { jpeg, width: 1, height: 1 });
+    const text = new TextDecoder('latin1').decode(pdf);
+    expect(text.startsWith('%PDF-1.4')).toBe(true);
+    expect(text.trimEnd().endsWith('%%EOF')).toBe(true);
+    expect(text).toContain('(Assembly guide) Tj');
+    expect(text).toContain('/Filter /DCTDecode');
+    // The cross-reference table points at real objects.
+    const xref = +/startxref\n(\d+)/.exec(text)![1];
+    expect(text.slice(xref, xref + 4)).toBe('xref');
+    const offsets = [...text.slice(xref).matchAll(/^(\d{10}) 00000 n $/gm)].map((m) => +m[1]);
+    for (const [i, off] of offsets.entries()) expect(text.slice(off).startsWith(`${i + 1} 0 obj`)).toBe(true);
+  });
+});
