@@ -1,4 +1,21 @@
-import { useEffect, useId, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useId, useState, type ReactNode } from 'react';
+
+/**
+ * UI mode shared by all panels.
+ * advanced: show every setting (false = only the basics).
+ * flat: sections render as plain open blocks (used by the step-by-step layout).
+ */
+export const UiContext = createContext({ advanced: true, flat: false });
+
+/** Shows its children only in Advanced mode. */
+export function Advanced({ children }: { children: ReactNode }) {
+  return useContext(UiContext).advanced ? <>{children}</> : null;
+}
+
+/** Shows its children only in Simple mode. */
+export function SimpleOnly({ children }: { children: ReactNode }) {
+  return useContext(UiContext).advanced ? null : <>{children}</>;
+}
 
 interface NumberFieldProps {
   label: string;
@@ -90,6 +107,19 @@ export function Toggle({ label, checked, onChange }: { label: string; checked: b
 }
 
 export function Section({ title, children, defaultOpen = true, badge }: { title: string; children: ReactNode; defaultOpen?: boolean; badge?: string }) {
+  const { flat } = useContext(UiContext);
+  if (flat) {
+    // In the step-by-step layout the step already has a number, so drop "3. " etc.
+    return (
+      <section className="section flat">
+        <div className="section-head">
+          <h2>{title.replace(/^\d+\.\s*/, '')}</h2>
+          {badge && <span className="badge">{badge}</span>}
+        </div>
+        <div className="section-body">{children}</div>
+      </section>
+    );
+  }
   return (
     <details className="section" open={defaultOpen}>
       <summary>

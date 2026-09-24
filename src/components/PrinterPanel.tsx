@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { GcodeFlavor, PrinterProfile } from '../types';
 import { blankCustomPrinter } from '../profiles/printers';
-import { NumberField, Section, SelectField, Toggle } from './fields';
+import { Advanced, NumberField, Section, SelectField, Toggle } from './fields';
 
 interface Props {
   printers: PrinterProfile[];
@@ -32,6 +32,7 @@ export function PrinterPanel({ printers, printer, onSelect, onSaveCustom, onDele
         {printer.filamentDiameter} mm filament · {printer.flavor}
       </p>
       {printer.notes && <p className="note small">{printer.notes}</p>}
+      <Advanced>
       <div className="row">
         <button className="btn ghost" onClick={() => startCustom(printer)}>Copy &amp; edit</button>
         <button className="btn ghost" onClick={() => startCustom()}>New custom printer</button>
@@ -54,6 +55,7 @@ export function PrinterPanel({ printers, printer, onSelect, onSaveCustom, onDele
           }}
         />
       )}
+      </Advanced>
     </Section>
   );
 }

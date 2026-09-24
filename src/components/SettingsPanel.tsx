@@ -1,6 +1,6 @@
 import type { Adhesion, InfillPattern, LayerRange, PrintSettings, SeamPosition } from '../types';
 import { NOZZLE_SIZES, QUALITY_PRESETS } from '../profiles/settings';
-import { NumberField, Section, SelectField, Toggle } from './fields';
+import { Advanced, NumberField, Section, SelectField, SimpleOnly, Toggle } from './fields';
 
 interface Props {
   settings: PrintSettings;
@@ -26,6 +26,7 @@ export function SettingsPanel({ settings: s, onChange, layerInfo }: Props) {
         </div>
       </div>
 
+      <Advanced>
       <div className="grid2">
         <SelectField
           label="Nozzle size"
@@ -40,10 +41,16 @@ export function SettingsPanel({ settings: s, onChange, layerInfo }: Props) {
         <NumberField label="Bottom layers" min={0} max={50} value={s.bottomLayers} onChange={(v) => set('bottomLayers', Math.round(v))} />
       </div>
 
+      </Advanced>
+
       <div className="field">
         <label htmlFor="infill">Infill: {s.infillDensity}%</label>
         <input id="infill" type="range" min={0} max={100} step={5} value={s.infillDensity} onChange={(e) => set('infillDensity', +e.target.value)} />
       </div>
+      <SimpleOnly>
+        <Toggle label="Add supports under overhangs" checked={s.supports} onChange={(v) => set('supports', v)} />
+      </SimpleOnly>
+      <Advanced>
       <SelectField<InfillPattern>
         label="Infill pattern"
         value={s.infillPattern}
@@ -172,6 +179,7 @@ export function SettingsPanel({ settings: s, onChange, layerInfo }: Props) {
         )}
         {s.ironing && <p className="muted small">Only the very top of each part is ironed. It adds a few minutes per surface.</p>}
       </details>
+      </Advanced>
     </Section>
   );
 }
