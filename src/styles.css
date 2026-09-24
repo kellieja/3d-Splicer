@@ -186,3 +186,8 @@ p { margin: 0; }
 .big-stepper input { width: 80px; text-align: center; font-size: 16px; font-weight: 650; }
 .big-stepper .btn { font-size: 18px; padding: 4px 14px; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+.range-row { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 6px; align-items: end; margin-bottom: 4px; }
+.cut-axis .grid3 { grid-template-columns: 1.25fr 1fr 1fr; }
+.cut-axis .input-unit input { padding-right: 26px; }
+.cut-axis .unit { right: 6px; }

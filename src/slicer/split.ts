@@ -8,7 +8,7 @@ import { area, difference, intersection, offset, SCALE, splitIslands, type Path,
 /*
  * Splitting ("splicing") models that are too big for the printer.
  *
- *  1. The model is cut by axis-aligned planes into a grid of parts.
+ *  1. The model is cut by planes (straight or tilted) into a grid of parts.
  *     Every cut face is closed with a flat cap, so each part is a solid.
  *  2. Where two parts meet, dowel joints are added: a pin on the lower part
  *     and a matching hole in the upper part (lower/upper along the cut axis).
@@ -32,6 +32,8 @@ export interface DowelOptions {
 export interface SplitOptions {
   /** Cut positions per axis, measured from the model's minimum corner (mm). */
   cuts: Cuts;
+  /** Optional tilt (degrees) for each cut, matching `cuts` by position in each list. */
+  tilts?: CutTilts;
   dowels: DowelOptions;
   autoOrient: boolean;
   printer: PrinterProfile;
@@ -48,6 +50,8 @@ export interface SplitPart {
   pins: number;
   holes: number;
   fits: boolean;
+  /** Indexes of the pieces this one joins onto. */
+  joins: number[];
 }
 
 export interface PlacedPart {
@@ -65,6 +69,8 @@ export interface SplitResult {
   plates: Plate[];
   /** Absolute cut positions actually used. */
   cuts: Cuts;
+  /** The cut planes (including tilt), in cutting order. */
+  planes: CutPlane[];
   dowels: number;
   warnings: string[];
 }
@@ -148,22 +154,69 @@ export function cutsForPieceCount(
   return { cuts: evenCuts(size, best), minimum };
 }
 
-// ─── Coordinates on a cut plane ─────────────────────────────────────────
-// For a plane perpendicular to axis a we use cyclic coordinates (u, v, w)
-// with w along a. Cyclic permutations keep triangle winding intact.
+// ─── Cut planes ─────────────────────────────────────────────────────────
+// Every cut is a plane n·p = value with its own right-handed frame (e1, e2, n):
+// points on it are described by (u, v) = (e1·p, e2·p), and w = n·p runs across it.
+// Straight cuts use exact axis frames; tilted cuts rotate them.
 
-function toUVW(a: Axis, x: number, y: number, z: number): [number, number, number] {
-  return a === 0 ? [y, z, x] : a === 1 ? [z, x, y] : [x, y, z];
+type V3 = [number, number, number];
+
+export interface CutPlane {
+  id: number;
+  /** Axis the cut goes across (it separates grid cells along this axis). */
+  axis: Axis;
+  n: V3;
+  e1: V3;
+  e2: V3;
+  /** n·p for points on the plane. */
+  value: number;
+  /** A point on the plane near the middle of the model (for drawing it). */
+  point: V3;
 }
 
-function fromUVW(a: Axis, u: number, v: number, w: number): [number, number, number] {
-  return a === 0 ? [w, u, v] : a === 1 ? [v, w, u] : [u, v, w];
+/** Tilt of each cut in degrees: [around the first other axis, around the second]. */
+export type CutTilts = [[number, number][], [number, number][], [number, number][]];
+
+const dot = (a: V3, b: V3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const crossV = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+
+const AXIS_FRAMES: [V3, V3, V3][] = [
+  [[0, 1, 0], [0, 0, 1], [1, 0, 0]], // X cut: u = y, v = z
+  [[0, 0, 1], [1, 0, 0], [0, 1, 0]], // Y cut: u = z, v = x
+  [[1, 0, 0], [0, 1, 0], [0, 0, 1]], // Z cut: u = x, v = y
+];
+
+/** Rotates v around unit axis k by angle (radians), Rodrigues' formula. */
+function rotateAround(v: V3, k: V3, angle: number): V3 {
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const kv = crossV(k, v), kd = dot(k, v);
+  return [0, 1, 2].map((i) => v[i] * c + kv[i] * s + k[i] * kd * (1 - c)) as V3;
 }
 
-function permute(soup: ArrayLike<number>, a: Axis): Float32Array {
+export function makeCutPlane(id: number, axis: Axis, point: V3, tilt: [number, number] = [0, 0]): CutPlane {
+  let [e1, e2, n] = AXIS_FRAMES[axis].map((v) => [...v] as V3);
+  const [ta, tb] = tilt.map((t) => (Math.max(-75, Math.min(75, t || 0)) * Math.PI) / 180);
+  if (ta || tb) {
+    // Tilt around the plane's first in-plane axis, then around its second.
+    const k1 = AXIS_FRAMES[axis][0], k2 = AXIS_FRAMES[axis][1];
+    [e1, e2, n] = [e1, e2, n].map((v) => rotateAround(rotateAround(v, k1, ta), k2, tb)) as [V3, V3, V3];
+  }
+  return { id, axis, n, e1, e2, value: dot(n, point), point };
+}
+
+function toUVW(f: CutPlane, x: number, y: number, z: number): V3 {
+  const p: V3 = [x, y, z];
+  return [dot(f.e1, p), dot(f.e2, p), dot(f.n, p)];
+}
+
+function fromUVW(f: CutPlane, u: number, v: number, w: number): V3 {
+  return [0, 1, 2].map((i) => u * f.e1[i] + v * f.e2[i] + w * f.n[i]) as V3;
+}
+
+function permute(soup: ArrayLike<number>, f: CutPlane): Float32Array {
   const out = new Float32Array(soup.length);
   for (let i = 0; i < soup.length; i += 3) {
-    const [u, v, w] = toUVW(a, soup[i], soup[i + 1], soup[i + 2]);
+    const [u, v, w] = toUVW(f, soup[i], soup[i + 1], soup[i + 2]);
     out[i] = u;
     out[i + 1] = v;
     out[i + 2] = w;
@@ -171,26 +224,18 @@ function permute(soup: ArrayLike<number>, a: Axis): Float32Array {
   return out;
 }
 
-/** Which of the plane's (u, v) coordinates runs along the `other` axis. */
-function uvIndexOf(planeAxis: Axis, other: Axis): 0 | 1 {
-  // toUVW(axis, 0, 1, 2) lists the source axis for u, v and w.
-  return toUVW(planeAxis, 0, 1, 2)[0] === other ? 0 : 1;
-}
-
 // ─── Parts under construction ───────────────────────────────────────────
 
 interface Cap {
-  axis: Axis;
-  value: number;
-  /** +1: cap faces +axis (solid is below the plane). -1: faces -axis. */
+  plane: CutPlane;
+  /** +1: cap faces +n (solid is below the plane). -1: faces -n. */
   side: 1 | -1;
   /** Cross-section in plane (u, v) coordinates, Clipper units. */
   region: Paths;
 }
 
 interface Joint {
-  axis: Axis;
-  value: number;
+  plane: CutPlane;
   /** Centre in plane (u, v) coordinates, mm. */
   u: number;
   v: number;
@@ -214,21 +259,25 @@ function pushTri(out: number[], p0: number[], p1: number[], p2: number[], normal
   out.push(p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], p2[0], p2[1], p2[2]);
 }
 
-/** Splits body triangles by the plane coord[a] = value. */
-function splitBody(body: number[], a: Axis, value: number): { below: number[]; above: number[] } {
+/** Splits body triangles by the plane. */
+function splitBody(body: number[], f: CutPlane, value: number): { below: number[]; above: number[] } {
   const below: number[] = [];
   const above: number[] = [];
-  const p = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  const p = [[0, 0, 0], [0, 0, 0], [0, 0, 0]] as V3[];
+  const dist = [0, 0, 0];
   const cross = (i: number, j: number) => {
     // Interpolate from the lower vertex so both neighbours compute identical points.
-    const [lo, hi] = p[i][a] < p[j][a] ? [p[i], p[j]] : [p[j], p[i]];
-    const t = (value - lo[a]) / (hi[a] - lo[a]);
+    const [lo, hi, dl, dh] = dist[i] < dist[j] ? [p[i], p[j], dist[i], dist[j]] : [p[j], p[i], dist[j], dist[i]];
+    const t = -dl / (dh - dl);
     return [lo[0] + (hi[0] - lo[0]) * t, lo[1] + (hi[1] - lo[1]) * t, lo[2] + (hi[2] - lo[2]) * t];
   };
   for (let t = 0; t < body.length; t += 9) {
-    for (let k = 0; k < 3; k++) for (let c = 0; c < 3; c++) p[k][c] = body[t + k * 3 + c];
+    for (let k = 0; k < 3; k++) {
+      for (let c = 0; c < 3; c++) p[k][c] = body[t + k * 3 + c];
+      dist[k] = dot(f.n, p[k]) - value;
+    }
     // Same rule as the slicer: a vertex exactly on the plane counts as above.
-    const isAbove = p.map((q) => q[a] >= value);
+    const isAbove = dist.map((d) => d >= 0);
     const n = isAbove.filter(Boolean).length;
     if (n === 3) { for (let k = 0; k < 9; k++) above.push(body[t + k]); continue; }
     if (n === 0) { for (let k = 0; k < 9; k++) below.push(body[t + k]); continue; }
@@ -245,9 +294,9 @@ function splitBody(body: number[], a: Axis, value: number): { below: number[]; a
   return { below, above };
 }
 
-/** Triangulates a planar region into 3D triangles facing `side` along axis a. */
-function triangulateRegion(region: Paths, a: Axis, w: number, side: 1 | -1, out: number[]) {
-  const normal = fromUVW(a, 0, 0, side);
+/** Triangulates a planar region into 3D triangles facing `side` along the plane normal. */
+function triangulateRegion(region: Paths, f: CutPlane, w: number, side: 1 | -1, out: number[]) {
+  const normal = f.n.map((c) => c * side);
   for (const island of splitIslands(region)) {
     const contour = island.outer.map((p) => new Vector2(p.X / SCALE, p.Y / SCALE));
     const holes = island.holes.map((h) => h.map((p) => new Vector2(p.X / SCALE, p.Y / SCALE)));
@@ -256,9 +305,9 @@ function triangulateRegion(region: Paths, a: Axis, w: number, side: 1 | -1, out:
     for (const [i, j, k] of faces) {
       pushTri(
         out,
-        fromUVW(a, all[i].x, all[i].y, w),
-        fromUVW(a, all[j].x, all[j].y, w),
-        fromUVW(a, all[k].x, all[k].y, w),
+        fromUVW(f, all[i].x, all[i].y, w),
+        fromUVW(f, all[j].x, all[j].y, w),
+        fromUVW(f, all[k].x, all[k].y, w),
         normal,
       );
     }
@@ -267,60 +316,73 @@ function triangulateRegion(region: Paths, a: Axis, w: number, side: 1 | -1, out:
 
 function materialize(part: WorkPart): Float32Array {
   const out = part.body.slice();
-  for (const c of part.caps) triangulateRegion(c.region, c.axis, c.value, c.side, out);
+  for (const c of part.caps) triangulateRegion(c.region, c.plane, c.plane.value, c.side, out);
   return new Float32Array(out);
 }
 
-function crossSection(soup: Float32Array, a: Axis, value: number): Paths {
-  return sliceMesh(permute(soup, a), [value])[0];
+function crossSection(soup: Float32Array, f: CutPlane, value: number): Paths {
+  return sliceMesh(permute(soup, f), [value])[0];
 }
 
-const BIG = 1e9;
+const BIG = 1e5; // mm
 
-function halfPlane(uvIndex: 0 | 1, value: number, keepBelow: boolean): Paths {
-  const c = Math.round(value * SCALE);
-  const [lo, hi] = keepBelow ? [-BIG, c] : [c, BIG];
-  const rect = uvIndex === 0
-    ? [{ X: lo, Y: -BIG }, { X: hi, Y: -BIG }, { X: hi, Y: BIG }, { X: lo, Y: BIG }]
-    : [{ X: -BIG, Y: lo }, { X: BIG, Y: lo }, { X: BIG, Y: hi }, { X: -BIG, Y: hi }];
-  return [rect];
+/**
+ * The part of an existing cap's plane that lies below (or above) a new cut,
+ * as a big polygon in the cap's (u, v) coordinates.
+ */
+function halfPlane(cap: CutPlane, cut: CutPlane, keepBelow: boolean): Paths | 'all' | 'none' {
+  // Points on the cap plane: p = u·e1 + v·e2 + w·n. Below the cut when α·u + β·v < γ.
+  const alpha = dot(cut.n, cap.e1), beta = dot(cut.n, cap.e2);
+  const gamma = cut.value - cap.value * dot(cut.n, cap.n);
+  const L = Math.hypot(alpha, beta);
+  if (L < 1e-9) return (gamma > 0) === keepBelow ? 'all' : 'none'; // parallel planes
+  const m = [alpha / L, beta / L], t = [-m[1], m[0]];
+  const q = [(m[0] * gamma) / L, (m[1] * gamma) / L];
+  const side = keepBelow ? -1 : 1;
+  const pt = (a: number, b: number) => ({
+    X: Math.round((q[0] + t[0] * a + m[0] * b) * SCALE),
+    Y: Math.round((q[1] + t[1] * a + m[1] * b) * SCALE),
+  });
+  const poly = [pt(-BIG, 0), pt(BIG, 0), pt(BIG, side * BIG), pt(-BIG, side * BIG)];
+  if (ClipperLib.Clipper.Area(poly) < 0) poly.reverse();
+  return [poly];
 }
 
-function extent(body: number[], a: Axis): [number, number] {
+function extent(body: number[], f: CutPlane): [number, number] {
   let min = Infinity, max = -Infinity;
-  for (let i = a; i < body.length; i += 3) {
-    if (body[i] < min) min = body[i];
-    if (body[i] > max) max = body[i];
+  for (let i = 0; i < body.length; i += 3) {
+    const d = f.n[0] * body[i] + f.n[1] * body[i + 1] + f.n[2] * body[i + 2];
+    if (d < min) min = d;
+    if (d > max) max = d;
   }
   return [min, max];
 }
 
-function cutPart(part: WorkPart, a: Axis, value: number): WorkPart[] {
-  const [min, max] = extent(part.body, a);
+function cutPart(part: WorkPart, f: CutPlane): WorkPart[] {
+  const value = f.value;
+  const a = f.axis;
+  const [min, max] = extent(part.body, f);
   if (!(min < value && max > value)) {
     // The plane misses this part; it just moves to the right grid cell.
     if (min >= value) part.cell[a]++;
     return [part];
   }
-  const section = crossSection(materialize(part), a, value);
-  const { below, above } = splitBody(part.body, a, value);
+  const section = crossSection(materialize(part), f, value);
+  const { below, above } = splitBody(part.body, f, value);
   const lo: WorkPart = { body: below, caps: [], cell: [...part.cell], pins: [], holes: [] };
   const hi: WorkPart = { body: above, caps: [], cell: [...part.cell], pins: [], holes: [] };
   hi.cell[a]++;
   for (const cap of part.caps) {
-    if (cap.axis === a) {
-      (cap.value < value ? lo : hi).caps.push(cap);
-      continue;
+    for (const [target, keepBelow] of [[lo, true], [hi, false]] as [WorkPart, boolean][]) {
+      const half = halfPlane(cap.plane, f, keepBelow);
+      if (half === 'none') continue;
+      const region = half === 'all' ? cap.region : intersection(cap.region, half);
+      if (region.length) target.caps.push({ ...cap, region });
     }
-    const uvi = uvIndexOf(cap.axis, a);
-    const rl = intersection(cap.region, halfPlane(uvi, value, true));
-    const rh = intersection(cap.region, halfPlane(uvi, value, false));
-    if (rl.length) lo.caps.push({ ...cap, region: rl });
-    if (rh.length) hi.caps.push({ ...cap, region: rh });
   }
   if (section.length) {
-    lo.caps.push({ axis: a, value, side: 1, region: section });
-    hi.caps.push({ axis: a, value, side: -1, region: section });
+    lo.caps.push({ plane: f, side: 1, region: section });
+    hi.caps.push({ plane: f, side: -1, region: section });
   }
   return [lo, hi].filter((p) => p.body.length > 0);
 }
@@ -387,26 +449,26 @@ function dowelCandidates(face: Paths, rHole: number, diameter: number): [number,
 }
 
 /** Adds cylinder walls between rings; `outward` = pin (normals away from axis). */
-function cylinder(out: number[], a: Axis, u: number, v: number, rings: [number, number][], outward: boolean) {
+function cylinder(out: number[], f: CutPlane, u: number, v: number, rings: [number, number][], outward: boolean) {
   const ring = (r: number, w: number) =>
-    circle(u, v, r).map((p) => fromUVW(a, p.X / SCALE, p.Y / SCALE, w));
+    circle(u, v, r).map((p) => fromUVW(f, p.X / SCALE, p.Y / SCALE, w));
   for (let k = 0; k < rings.length - 1; k++) {
     const [r0, w0] = rings[k], [r1, w1] = rings[k + 1];
     const A = ring(r0, w0), B = ring(r1, w1);
     for (let i = 0; i < A.length; i++) {
       const j = (i + 1) % A.length;
       const t = ((i + 0.5) / A.length) * Math.PI * 2;
-      const radial = fromUVW(a, Math.cos(t), Math.sin(t), 0).map((c) => (outward ? c : -c));
+      const radial = fromUVW(f, Math.cos(t), Math.sin(t), 0).map((c) => (outward ? c : -c));
       pushTri(out, A[i], A[j], B[j], radial);
       pushTri(out, A[i], B[j], B[i], radial);
     }
   }
 }
 
-function disc(out: number[], a: Axis, u: number, v: number, r: number, w: number, side: 1 | -1) {
-  const pts = circle(u, v, r).map((p) => fromUVW(a, p.X / SCALE, p.Y / SCALE, w));
-  const c = fromUVW(a, u, v, w);
-  const normal = fromUVW(a, 0, 0, side);
+function disc(out: number[], f: CutPlane, u: number, v: number, r: number, w: number, side: 1 | -1) {
+  const pts = circle(u, v, r).map((p) => fromUVW(f, p.X / SCALE, p.Y / SCALE, w));
+  const c = fromUVW(f, u, v, w);
+  const normal = f.n.map((x) => x * side);
   for (let i = 0; i < pts.length; i++) pushTri(out, c, pts[i], pts[(i + 1) % pts.length], normal);
 }
 
@@ -415,36 +477,37 @@ function finalGeometry(part: WorkPart, d: DowelOptions): Float32Array {
   const rPin = d.diameter / 2;
   const rHole = rPin + d.tolerance / 2;
   for (const cap of part.caps) {
-    const here = (j: Joint) => j.axis === cap.axis && Math.abs(j.value - cap.value) < 1e-6;
+    const f = cap.plane;
+    const here = (j: Joint) => j.plane.id === f.id;
     const pins = cap.side === 1 ? part.pins.filter(here) : [];
     const holes = cap.side === -1 ? part.holes.filter(here) : [];
     const cutouts = [...pins.map((j) => circle(j.u, j.v, rPin)), ...holes.map((j) => circle(j.u, j.v, rHole))];
     const region = cutouts.length ? difference(cap.region, cutouts) : cap.region;
-    triangulateRegion(region, cap.axis, cap.value, cap.side, out);
+    triangulateRegion(region, f, f.value, cap.side, out);
     for (const j of pins) {
-      // Pin sticks out of the +axis face, with a small chamfer at the tip.
-      const w = cap.value;
+      // Pin sticks out of the +n face, with a small chamfer at the tip.
+      const w = f.value;
       const chamfer = Math.min(0.6, d.length / 4);
-      cylinder(out, cap.axis, j.u, j.v, [[rPin, w], [rPin, w + d.length - chamfer], [rPin - chamfer * 0.7, w + d.length]], true);
-      disc(out, cap.axis, j.u, j.v, rPin - chamfer * 0.7, w + d.length, 1);
+      cylinder(out, f, j.u, j.v, [[rPin, w], [rPin, w + d.length - chamfer], [rPin - chamfer * 0.7, w + d.length]], true);
+      disc(out, f, j.u, j.v, rPin - chamfer * 0.7, w + d.length, 1);
     }
     for (const j of holes) {
-      // Hole goes into the part, which lies above the -axis face.
+      // Hole goes into the part, which lies above the -n face.
       const depth = d.length + HOLE_EXTRA_DEPTH;
-      cylinder(out, cap.axis, j.u, j.v, [[rHole, cap.value], [rHole, cap.value + depth]], false);
-      disc(out, cap.axis, j.u, j.v, rHole, cap.value + depth, -1);
+      cylinder(out, f, j.u, j.v, [[rHole, f.value], [rHole, f.value + depth]], false);
+      disc(out, f, j.u, j.v, rHole, f.value + depth, -1);
     }
   }
   return new Float32Array(out);
 }
 
-function addDowels(parts: WorkPart[], d: DowelOptions, warnings: string[], labelOf: (p: WorkPart) => string): number {
-  if (!d.enabled) return 0;
+/** Records which parts meet which (by work-part index), for the assembly guide. */
+type Joins = Map<WorkPart, Set<WorkPart>>;
+
+function addDowels(parts: WorkPart[], d: DowelOptions, warnings: string[], labelOf: (p: WorkPart) => string, joins: Joins): number {
   const rHole = d.diameter / 2 + d.tolerance / 2;
   const depth = d.length + HOLE_EXTRA_DEPTH;
   let count = 0;
-  const key = (c: number[]) => c.join(',');
-  const byCell = new Map(parts.map((p) => [key(p.cell), p]));
   const solids = new Map<WorkPart, Float32Array>();
   const solid = (p: WorkPart) => {
     let s = solids.get(p);
@@ -455,28 +518,33 @@ function addDowels(parts: WorkPart[], d: DowelOptions, warnings: string[], label
   for (const lower of parts) {
     for (const cap of lower.caps) {
       if (cap.side !== 1) continue;
-      const cell = [...lower.cell];
-      cell[cap.axis]++;
-      const upper = byCell.get(key(cell));
-      const other = upper?.caps.find((c) => c.axis === cap.axis && c.side === -1 && Math.abs(c.value - cap.value) < 1e-6);
-      if (!upper || !other) continue;
-      const face = intersection(cap.region, other.region);
-      if (area(face) < 1) continue;
+      // The neighbour is whichever part has the other side of this same cut touching it.
+      for (const upper of parts) {
+        if (upper === lower) continue;
+        const other = upper.caps.find((c) => c.plane.id === cap.plane.id && c.side === -1);
+        if (!other) continue;
+        const face = intersection(cap.region, other.region);
+        if (area(face) < 1) continue;
+        (joins.get(lower) ?? joins.set(lower, new Set()).get(lower)!).add(upper);
+        (joins.get(upper) ?? joins.set(upper, new Set()).get(upper)!).add(lower);
+        if (!d.enabled) continue;
 
-      // The hole needs solid material around it all the way down.
-      const checks = [0.3, 0.65, 1].map((f) => crossSection(solid(upper), cap.axis, cap.value + depth * f + 0.3));
-      const valid = ([u, v]: [number, number]) => checks.every((sec) => insideRegion(sec, u, v, rHole + 0.8));
-      // Per island, use the first layout whose holes all have enough material around them.
-      const ok = dowelCandidates(face, rHole, d.diameter).flatMap((layouts) => layouts.find((l) => l.every(valid)) ?? []);
-      if (ok.length === 0) {
-        warnings.push(`The joint between ${labelOf(lower)} and ${labelOf(upper)} is too small or thin for dowels: glue it instead.`);
-        continue;
-      }
-      for (const [u, v] of ok) {
-        const j: Joint = { axis: cap.axis, value: cap.value, u, v };
-        lower.pins.push(j);
-        upper.holes.push(j);
-        count++;
+        // The hole needs solid material around it all the way down.
+        const f = cap.plane;
+        const checks = [0.3, 0.65, 1].map((k) => crossSection(solid(upper), f, f.value + depth * k + 0.3));
+        const valid = ([u, v]: [number, number]) => checks.every((sec) => insideRegion(sec, u, v, rHole + 0.8));
+        // Per island, use the first layout whose holes all have enough material around them.
+        const ok = dowelCandidates(face, rHole, d.diameter).flatMap((layouts) => layouts.find((l) => l.every(valid)) ?? []);
+        if (ok.length === 0) {
+          warnings.push(`The joint between ${labelOf(lower)} and ${labelOf(upper)} is too small or thin for dowels: glue it instead.`);
+          continue;
+        }
+        for (const [u, v] of ok) {
+          const j: Joint = { plane: f, u, v };
+          lower.pins.push(j);
+          upper.holes.push(j);
+          count++;
+        }
       }
     }
   }
@@ -496,6 +564,24 @@ const ROTATIONS: { name: string; f: Rot }[] = [
   { name: '+Y down', f: (x, y, z) => [x, z, -y] },
   { name: '-Y down', f: (x, y, z) => [x, -z, y] },
 ];
+
+/** Rotation that turns direction `dir` to point straight down (−Z). */
+function faceDown(dir: V3): Rot {
+  const l = Math.hypot(...dir);
+  const d: V3 = [dir[0] / l, dir[1] / l, dir[2] / l];
+  const c = -d[2]; // cos of angle between d and −Z
+  if (c > 1 - 1e-9) return (x, y, z) => [x, y, z];
+  if (c < -1 + 1e-9) return (x, y, z) => [x, -y, -z];
+  const k = crossV(d, [0, 0, -1]);
+  const kl = Math.hypot(...k);
+  const axis: V3 = [k[0] / kl, k[1] / kl, k[2] / kl];
+  const angle = Math.acos(c);
+  return (x, y, z) => rotateAround([x, y, z], axis, angle);
+}
+
+function boxesTouch(a: { min: number[]; max: number[] }, b: { min: number[]; max: number[] }, gap = 1): boolean {
+  return [0, 1, 2].every((i) => a.min[i] <= b.max[i] + gap && b.min[i] <= a.max[i] + gap);
+}
 
 function rotateSoup(soup: Float32Array, f: Rot): Float32Array {
   const out = new Float32Array(soup.length);
@@ -587,20 +673,31 @@ export function splitModel(positions: TriangleSoup, opts: SplitOptions): SplitRe
   const { printer, settings: s, dowels: d } = opts;
   const warnings: string[] = [];
   const b = computeBounds(positions);
-  const cuts = opts.cuts.map((list, a) =>
-    [...new Set(list)]
-      .filter((c) => c > 0.5 && c < b.max[a] - b.min[a] - 0.5)
-      .sort((x, y) => x - y)
-      .map((c) => b.min[a] + c),
-  ) as Cuts;
+  const centre: V3 = [0, 1, 2].map((a) => (b.min[a] + b.max[a]) / 2) as V3;
+
+  // Keep each cut's tilt with it while sorting and removing duplicates.
+  const planes: CutPlane[] = [];
+  const cuts = [[], [], []] as unknown as Cuts;
+  for (const a of [0, 1, 2] as Axis[]) {
+    const list = opts.cuts[a]
+      .map((c, i) => ({ c, tilt: opts.tilts?.[a]?.[i] ?? ([0, 0] as [number, number]) }))
+      .filter(({ c }) => c > 0.5 && c < b.max[a] - b.min[a] - 0.5)
+      .sort((x, y) => x.c - y.c)
+      .filter((x, i, all) => i === 0 || x.c !== all[i - 1].c);
+    for (const { c, tilt } of list) {
+      const point = [...centre] as V3;
+      point[a] = b.min[a] + c;
+      planes.push(makeCutPlane(planes.length, a, point, tilt));
+      cuts[a].push(b.min[a] + c);
+    }
+  }
 
   let work: WorkPart[] = [{ body: Array.from(positions), caps: [], cell: [0, 0, 0], pins: [], holes: [] }];
-  for (const a of [0, 1, 2] as Axis[]) {
-    for (const value of cuts[a]) work = work.flatMap((p) => cutPart(p, a, value));
-  }
+  for (const f of planes) work = work.flatMap((p) => cutPart(p, f));
   work.sort((p, q) => p.cell[2] - q.cell[2] || p.cell[1] - q.cell[1] || p.cell[0] - q.cell[0]);
   const labelOf = (p: WorkPart) => `part ${work.indexOf(p) + 1}`;
-  const dowels = addDowels(work, d, warnings, labelOf);
+  const joins: Joins = new Map();
+  const dowels = addDowels(work, d, warnings, labelOf, joins);
 
   const area = plateArea(printer, s);
   const fitsBed = (w: number, h: number) => (w <= area.w && h <= area.h) || (h <= area.w && w <= area.h);
@@ -618,28 +715,36 @@ export function splitModel(positions: TriangleSoup, opts: SplitOptions): SplitRe
     }
   }
   if (crumbs) warnings.push(`${crumbs} tiny crumb${crumbs === 1 ? '' : 's'} left by the cuts (under ${MIN_PIECE_VOLUME} mm³) ${crumbs === 1 ? 'was' : 'were'} left out.`);
+  const boxes = pieces.map((pc) => computeBounds(pc.geom));
 
   pieces.forEach(({ work: p, geom }, i) => {
-    const bb = computeBounds(geom);
+    const bb = boxes[i];
     const tol = 0.5;
+    const inBox = ([x, y, z]: V3) =>
+      x >= bb.min[0] - tol && x <= bb.max[0] + tol && y >= bb.min[1] - tol && y <= bb.max[1] + tol && z >= bb.min[2] - tol && z <= bb.max[2] + tol;
     // Only the pins that belong to this piece matter for how it can lie.
-    const myPins = p.pins.filter((j) => {
-      const [x, y, z] = fromUVW(j.axis, j.u, j.v, j.value + d.length / 2);
-      return x >= bb.min[0] - tol && x <= bb.max[0] + tol && y >= bb.min[1] - tol && y <= bb.max[1] + tol && z >= bb.min[2] - tol && z <= bb.max[2] + tol;
-    });
-    const myHoles = p.holes.filter((j) => {
-      const [x, y, z] = fromUVW(j.axis, j.u, j.v, j.value);
-      return x >= bb.min[0] - tol && x <= bb.max[0] + tol && y >= bb.min[1] - tol && y <= bb.max[1] + tol && z >= bb.min[2] - tol && z <= bb.max[2] + tol;
-    });
-    const pinDirs = myPins.map((j) => fromUVW(j.axis, 0, 0, 1));
-    const choices = (opts.autoOrient ? ROTATIONS : ROTATIONS.slice(0, 1)).map((r) => {
+    const myPins = p.pins.filter((j) => inBox(fromUVW(j.plane, j.u, j.v, j.plane.value + d.length / 2)));
+    const myHoles = p.holes.filter((j) => inBox(fromUVW(j.plane, j.u, j.v, j.plane.value)));
+    const pinDirs = myPins.map((j) => j.plane.n);
+    // Candidate ways to lie: the six sides, plus flat on each tilted cut face.
+    const rotations = [...ROTATIONS];
+    for (const cap of p.caps) {
+      const outward = cap.plane.n.map((c) => c * cap.side) as V3;
+      if (Math.max(...outward.map(Math.abs)) < 0.9999) rotations.push({ name: 'cut face down', f: faceDown(outward) });
+    }
+    const choices = (opts.autoOrient ? rotations : rotations.slice(0, 1)).map((r) => {
       const soup = rotateSoup(geom, r.f);
       const [w, h, z] = sizeOf(soup);
       const fits = fitsBed(w, h) && z <= printer.maxZ;
       return { soup, fits, score: orientationScore(soup, pinDirs, r.f, s, d) + (fits ? 0 : 1e12) };
     });
     const best = choices.reduce((m, c) => (c.score < m.score - 1e-3 ? c : m), choices[0]);
-    parts.push({ id: i, label: `Part ${i + 1}`, cell: p.cell, positions: geom, pins: myPins.length, holes: myHoles.length, fits: best.fits });
+    // Neighbouring pieces: pieces of joined parts whose boxes touch this one.
+    const neighbours = pieces
+      .map((q, k) => ({ q, k }))
+      .filter(({ q, k }) => k !== i && joins.get(p)?.has(q.work) && boxesTouch(bb, boxes[k]))
+      .map(({ k }) => k);
+    parts.push({ id: i, label: `Part ${i + 1}`, cell: p.cell, positions: geom, pins: myPins.length, holes: myHoles.length, fits: best.fits, joins: neighbours });
     oriented.push(best.soup);
     if (!best.fits) warnings.push(`Part ${i + 1} is still too big for this printer: add more cuts.`);
   });
@@ -665,7 +770,7 @@ export function splitModel(positions: TriangleSoup, opts: SplitOptions): SplitRe
     return { parts: placed };
   });
 
-  return { parts, plates, cuts, dowels, warnings };
+  return { parts, plates, cuts, planes, dowels, warnings };
 }
 
 function sizeOf(soup: Float32Array): [number, number, number] {

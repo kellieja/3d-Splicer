@@ -22,6 +22,14 @@ and download G-code ready to print.
   pieces per plate when they fit). Pick the number of pieces yourself or let it choose. Change
   the model size and the number of pieces and plates updates live. Download all pieces as
   **STL files** or one **G-code** file per plate, each as a zip.
+- **Finish options:** variable layer height (adaptive thin layers on curves plus your own
+  height ranges), seam placement (aligned, nearest, rear, random) and ironing of top surfaces.
+- **Angled cuts & assembly guide:** tilt any cut up to 60°, and download a printable PDF guide
+  with every piece numbered, which plate it's on and which pieces it joins.
+- **Export to any slicer:** a project zip with one 3MF per plate (pieces laid flat and placed),
+  the uncut model and your settings (supports off, so you can add your own) for Bambu Studio,
+  OrcaSlicer, PrusaSlicer, Cura, Creality Print and others.
+- **Save projects:** a `.splicer` file keeps your model and every setting so you can carry on later.
 - **Layer preview:** step through every layer in 3D before you print.
 - **Estimates:** print time, filament length, weight and cost.
 - Reads **STL, OBJ and 3MF** files.
@@ -83,7 +91,10 @@ See [docs/EMBEDDING.md](docs/EMBEDDING.md) for more options.
 | `src/slicer/geometry.ts`    | Polygon offset and boolean helpers ([Clipper](https://www.npmjs.com/package/clipper-lib)) |
 | `src/slicer/toolpaths.ts`   | Walls, solid/sparse infill, supports, skirt and brim          |
 | `src/slicer/gcode.ts`       | G-code writer, extrusion maths and time estimate              |
-| `src/slicer/split.ts`       | Cutting large models, dowel joints, orientation, plate packing |
+| `src/slicer/split.ts`       | Cutting large models (straight or tilted), dowel joints, orientation, plate packing |
+| `src/slicer/layers.ts`      | Variable / adaptive layer heights                              |
+| `src/lib/threemf.ts`, `exportProject.ts` | 3MF writer and the "export for other slicers" zip |
+| `src/lib/assemblyGuide.ts`, `pdf.ts` | Printable assembly guide PDF                       |
 | `src/profiles/`             | Printer, filament and print-setting profiles                  |
 | `src/components/`           | React UI and the Three.js viewer                              |
 | `src/workers/`              | Runs the slicer off the main thread                           |
@@ -94,18 +105,39 @@ See [docs/EMBEDDING.md](docs/EMBEDDING.md) for more options.
 1. Load your model and scale it to the size you want (step 3).
 2. In **5. Split into pieces**, answer **Yes** to "Split this model into pieces?".
 3. Choose **Auto** (the fewest pieces that fit your printer) or **Choose** and type how many pieces
-   you want. Under **Adjust cuts** you can also set the pieces per direction or move each cut.
+   you want. Under **Adjust cuts** you can also set the pieces per direction, move each cut, or
+   **tilt** a cut (up to 60°) to follow a slope or hide the seam.
 4. Check the **Pieces** view (coloured pieces with orange cut planes) and the **All plates** view
    (every plate side by side, pieces lying flat; pieces share a plate when they fit).
 5. Adjust the **dowel joints** if needed: pin diameter, pin length and the **fit gap** (larger if
    pins are too tight on your printer, smaller if too loose).
 6. **Download pieces as STL (.zip)** to use another slicer, or click **Slice N plates** and download
    one G-code file per plate.
+7. **Assembly guide (PDF)** gives you a printable page with every piece numbered, the plate it's on,
+   which pieces it joins and a checkbox to tick off as you go.
 
 Separate bits (like an arm that doesn't touch the rest after a cut) become their own pieces, so
 nothing is left floating in the air. Tiny crumbs under 5 mm³ are left out.
 When assembling, push each pin into its matching hole, optionally with a drop of glue.
 If a joint face is too small or thin for a dowel, the app says so and you can just glue that joint.
+
+## Exporting to another slicer
+
+In **6. Save & export**, click **Export project for other slicers (.zip)**. Inside:
+
+| File | What it's for |
+| --- | --- |
+| `Plate 1.3mf`, `Plate 2.3mf`, … | One standard 3MF per plate, pieces laid flat and placed. Opens in every slicer. |
+| `All plates.3mf` | Every piece in one file, plate by plate (handy in Bambu Studio / OrcaSlicer). |
+| `Original model.3mf` | The whole model before cutting. |
+| `settings.ini` | Your settings for PrusaSlicer / SuperSlicer (File → Import Config). |
+| `SETTINGS.txt` | The same settings in plain English, to copy into any slicer. |
+| `HOW TO OPEN.txt` | Step-by-step for Bambu Studio, OrcaSlicer, PrusaSlicer, Cura and others. |
+
+Supports are turned **off** in the exported settings so you can add your own (normal, tree or painted).
+
+**Save project (.splicer)** keeps the model and all your choices; open it again with **Open project…**
+(or just open the `.splicer` file like a model).
 
 ## Printer notes
 
@@ -122,9 +154,7 @@ If a joint face is too small or thin for a dowel, the app says so and you can ju
 
 - More infill patterns (gyroid, honeycomb) and tree supports
 - Multi-material / colour changes (AMS, CFS, MMU)
-- Angled cut planes and printable assembly guides for split models
 - Several models on the bed and auto-arrange
-- Ironing, variable layer height and seam placement options
 - Import printer profiles from Cura / PrusaSlicer
 - Resin (SLA/MSLA) output
 

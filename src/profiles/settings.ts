@@ -22,6 +22,14 @@ export const DEFAULT_SETTINGS: PrintSettings = {
   skirtLoops: 2,
   retraction: true,
   zHop: 0,
+  seam: 'aligned',
+  ironing: false,
+  ironingFlow: 12,
+  ironingSpeed: 15,
+  ironingSpacing: 0.1,
+  adaptiveLayers: false,
+  adaptiveQuality: 50,
+  layerRanges: [],
 };
 
 export interface QualityPreset {

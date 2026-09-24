@@ -78,6 +78,18 @@ export interface FilamentProfile {
 
 export type InfillPattern = 'lines' | 'grid' | 'triangles';
 export type Adhesion = 'none' | 'skirt' | 'brim';
+/** Where each wall loop starts and ends (the visible "seam"). */
+export type SeamPosition = 'aligned' | 'nearest' | 'rear' | 'random';
+
+/** A height range printed with its own layer height. */
+export interface LayerRange {
+  /** mm from the bed */
+  from: number;
+  /** mm from the bed */
+  to: number;
+  /** layer height in mm */
+  height: number;
+}
 
 export interface PrintSettings {
   layerHeight: number;
@@ -110,6 +122,21 @@ export interface PrintSettings {
   retraction: boolean;
   /** Lift the nozzle during travel moves, in mm (0 = off). */
   zHop: number;
+  seam: SeamPosition;
+  /** A slow, low-flow pass over the topmost surfaces to smooth them. */
+  ironing: boolean;
+  /** Ironing flow, % of a full layer's worth of plastic over the ironed area. */
+  ironingFlow: number;
+  /** mm/s */
+  ironingSpeed: number;
+  /** Distance between ironing lines, mm. */
+  ironingSpacing: number;
+  /** Thinner layers on curves and slopes, thicker on straight walls. */
+  adaptiveLayers: boolean;
+  /** 0 = fastest (thicker layers), 100 = finest detail. */
+  adaptiveQuality: number;
+  /** Your own layer heights for chosen height ranges (these win over adaptive). */
+  layerRanges: LayerRange[];
 }
 
 export interface ModelTransform {
@@ -132,7 +159,8 @@ export type PathKind =
   | 'solid-infill'
   | 'sparse-infill'
   | 'support'
-  | 'skirt';
+  | 'skirt'
+  | 'ironing';
 
 export interface ToolPath {
   kind: PathKind;

@@ -1,5 +1,6 @@
-import type { Layer, PathKind, PrintSettings, ToolPath } from '../types';
+import type { Layer, PathKind, PrintSettings, SeamPosition, ToolPath } from '../types';
 import {
+  area,
   bounds,
   clipLines,
   difference,
@@ -32,7 +33,9 @@ export function generateToolpaths(regions: Paths[], opts: ToolpathOptions): Laye
   const { settings: s, lineWidth: lw, zs } = opts;
   const n = regions.length;
   const supports = s.supports ? computeSupportAreas(regions, zs, s, lw) : regions.map(() => []);
+  const ironAreas = s.ironing ? topmostSurfaces(regions, lw) : regions.map(() => []);
   const layers: Layer[] = [];
+  let seams: Pt[] = [];
 
   for (let i = 0; i < n; i++) {
     const region = regions[i];
@@ -90,10 +93,36 @@ export function generateToolpaths(regions: Paths[], opts: ToolpathOptions): Laye
       paths.push(...linePaths('support', fillLines(supports[i], spacing, i === 0 ? 90 : 0, true)));
     }
 
-    layers.push({ index: i, z: zs[i], height, paths: orderPaths(paths) });
+    if (ironAreas[i].length) {
+      // Cross the top skin lines so the nozzle smooths over the ridges.
+      const angle = (i % 2 === 0 ? 45 : -45) + 90;
+      paths.push(...linePaths('ironing', fillLines(ironAreas[i], Math.max(0.05, s.ironingSpacing), angle, true)));
+    }
+
+    const seam: SeamContext = { mode: s.seam ?? 'aligned', layer: i, previous: seams, next: [] };
+    layers.push({ index: i, z: zs[i], height, paths: orderPaths(paths, seam) });
+    seams = seam.next;
     opts.onProgress?.((i + 1) / n);
   }
   return layers;
+}
+
+/**
+ * The very top surfaces: the last layer of each part of the model (an island
+ * with nothing printed on top of it), shrunk to stay inside the outer wall.
+ * Steps partway up the model are not ironed.
+ */
+function topmostSurfaces(regions: Paths[], lw: number): Paths[] {
+  return regions.map((region, i) => {
+    const above = regions[i + 1] ?? [];
+    const tops: Paths = [];
+    for (const island of splitIslands(region)) {
+      const shape = islandPaths(island);
+      if (above.length && area(intersection(shape, above)) > 0.01) continue;
+      tops.push(...shape);
+    }
+    return tops.length ? open(offset(tops, -lw / 2), lw) : [];
+  });
 }
 
 /** Intersection of the regions of layers `from`..`to`. Empty if any layer is missing. */
@@ -227,14 +256,14 @@ function orderByNearest<T>(items: T[], pos: (t: T) => { X: number; Y: number }):
   return out;
 }
 
-const KIND_ORDER: PathKind[] = ['skirt', 'inner-wall', 'outer-wall', 'solid-infill', 'sparse-infill', 'support'];
+const KIND_ORDER: PathKind[] = ['skirt', 'inner-wall', 'outer-wall', 'solid-infill', 'sparse-infill', 'support', 'ironing'];
 
 /**
  * Reduces travel: keeps walls grouped per island as generated, and orders
  * infill/support lines greedily, flipping lines to start at the near end
  * and starting closed loops at the vertex nearest the nozzle.
  */
-function orderPaths(paths: ToolPath[]): ToolPath[] {
+function orderPaths(paths: ToolPath[], seam: SeamContext): ToolPath[] {
   const out: ToolPath[] = [];
   let x = 0, y = 0;
   const emit = (p: ToolPath) => {
@@ -246,7 +275,12 @@ function orderPaths(paths: ToolPath[]): ToolPath[] {
 
   // Skirt and walls keep their generated order (island by island).
   const loops = paths.filter((p) => p.kind === 'skirt' || p.kind.endsWith('wall'));
-  for (const p of loops) emit(rotateLoopTo(p, x, y));
+  loops.forEach((p, n) => {
+    const start = p.kind === 'skirt' ? nearestVertex(p, x, y) : seamVertex(p, seam, x, y, n);
+    const rotated = rotateLoop(p, start);
+    if (p.kind === 'outer-wall') seam.next.push({ x: rotated.points[0], y: rotated.points[1] });
+    emit(rotated);
+  });
 
   for (const kind of KIND_ORDER.slice(3)) {
     const left = paths.filter((p) => p.kind === kind);
@@ -272,13 +306,92 @@ function reversePath(p: ToolPath): ToolPath {
   return { ...p, points: pts };
 }
 
-function rotateLoopTo(p: ToolPath, x: number, y: number): ToolPath {
-  if (!p.closed) return p;
+interface Pt { x: number; y: number }
+
+interface SeamContext {
+  mode: SeamPosition;
+  layer: number;
+  /** Where outer walls started on the layer below. */
+  previous: Pt[];
+  /** Filled in with this layer's outer-wall starts. */
+  next: Pt[];
+}
+
+/** Index (into points, step 2) of the vertex nearest to (x, y). */
+function nearestVertex(p: ToolPath, x: number, y: number): number {
   let best = 0, bestD = Infinity;
   for (let i = 0; i < p.points.length; i += 2) {
     const d = (p.points[i] - x) ** 2 + (p.points[i + 1] - y) ** 2;
     if (d < bestD) { bestD = d; best = i; }
   }
-  if (best === 0) return p;
-  return { ...p, points: [...p.points.slice(best), ...p.points.slice(0, best)] };
+  return best;
+}
+
+/** How sharp the corner at vertex i is: 0 = straight, 1 = folded back. */
+function cornerSharpness(pts: number[], i: number): number {
+  const n = pts.length;
+  const px = pts[(i - 2 + n) % n], py = pts[(i - 1 + n) % n];
+  const nx = pts[(i + 2) % n], ny = pts[(i + 3) % n];
+  const ax = pts[i] - px, ay = pts[i + 1] - py, bx = nx - pts[i], by = ny - pts[i + 1];
+  const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by);
+  if (la < 1e-6 || lb < 1e-6) return 0;
+  return (1 - (ax * bx + ay * by) / (la * lb)) / 2;
+}
+
+/** Deterministic pseudo-random number in [0, 1) so re-slicing gives the same G-code. */
+function hash01(a: number, b: number): number {
+  let h = (a * 73856093) ^ (b * 19349663) ^ 0x9e3779b9;
+  h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+/** Chooses where a wall loop starts, following the seam setting. */
+function seamVertex(p: ToolPath, ctx: SeamContext, x: number, y: number, loopIndex: number): number {
+  const pts = p.points;
+  const count = pts.length / 2;
+  if (!p.closed || count < 3) return 0;
+  switch (ctx.mode) {
+    case 'nearest':
+      return nearestVertex(p, x, y);
+    case 'random':
+      return Math.floor(hash01(ctx.layer, loopIndex * 7919 + count) * count) * 2;
+    case 'rear':
+    case 'aligned': {
+      let cx = 0, maxY = -Infinity;
+      for (let i = 0; i < pts.length; i += 2) { cx += pts[i]; if (pts[i + 1] > maxY) maxY = pts[i + 1]; }
+      cx /= count;
+      if (ctx.mode === 'rear') {
+        // Back-most point; among ties, the one nearest the middle.
+        let best = 0, bestScore = Infinity;
+        for (let i = 0; i < pts.length; i += 2) {
+          const score = (maxY - pts[i + 1]) * 100 + Math.abs(pts[i] - cx);
+          if (score < bestScore) { bestScore = score; best = i; }
+        }
+        return best;
+      }
+      // Aligned: stay close to the seam on the layer below (one tidy vertical line),
+      // tucked into a corner where there is one nearby.
+      // No seam within 10 mm below (first layer, or a new island): start at the back.
+      let ref: Pt = { x: cx, y: maxY };
+      let refD = 100;
+      for (const q of ctx.previous) {
+        const i = nearestVertex(p, q.x, q.y);
+        const d = (pts[i] - q.x) ** 2 + (pts[i + 1] - q.y) ** 2;
+        if (d < refD) { refD = d; ref = q; }
+      }
+      let best = 0, bestScore = Infinity;
+      for (let i = 0; i < pts.length; i += 2) {
+        const d = Math.hypot(pts[i] - ref.x, pts[i + 1] - ref.y);
+        const score = d - 3 * cornerSharpness(pts, i);
+        if (score < bestScore) { bestScore = score; best = i; }
+      }
+      return best;
+    }
+  }
+}
+
+function rotateLoop(p: ToolPath, start: number): ToolPath {
+  if (!p.closed || start === 0) return p;
+  return { ...p, points: [...p.points.slice(start), ...p.points.slice(0, start)] };
 }

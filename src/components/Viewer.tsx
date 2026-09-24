@@ -9,12 +9,12 @@ export interface ViewerMesh {
   color: number;
 }
 
-/** A cut plane drawn as a translucent rectangle. */
+/** A cut plane (straight or tilted) drawn as a translucent square. */
 export interface CutPlane {
-  axis: 0 | 1 | 2;
-  value: number;
-  min: [number, number, number];
-  max: [number, number, number];
+  normal: [number, number, number];
+  point: [number, number, number];
+  /** Width of the square in mm. */
+  size: number;
 }
 
 export interface ViewerProps {
@@ -188,16 +188,17 @@ export function Viewer({ printer, meshes, planes = [], preview, mode, layer, fra
     const s = sceneRef.current!;
     disposeChildren(s.planes);
     for (const p of planes) {
-      const pad = 6;
-      const size = [0, 1, 2].map((a) => (a === p.axis ? 0 : p.max[a] - p.min[a] + pad * 2));
-      const centre = [0, 1, 2].map((a) => (a === p.axis ? p.value : (p.min[a] + p.max[a]) / 2));
-      const geo = new THREE.BoxGeometry(Math.max(size[0], 0.01), Math.max(size[1], 0.01), Math.max(size[2], 0.01));
+      const geo = new THREE.PlaneGeometry(p.size, p.size);
       const mesh = new THREE.Mesh(
         geo,
         new THREE.MeshBasicMaterial({ color: 0xf97316, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false }),
       );
-      mesh.position.set(centre[0], centre[1], centre[2]);
+      // PlaneGeometry faces +Z; turn it to face the cut's normal.
+      const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(...p.normal).normalize());
+      mesh.quaternion.copy(q);
+      mesh.position.set(...p.point);
       const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: 0xf97316 }));
+      edges.quaternion.copy(q);
       edges.position.copy(mesh.position);
       s.planes.add(mesh, edges);
     }

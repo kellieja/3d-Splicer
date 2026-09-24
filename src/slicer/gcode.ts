@@ -37,6 +37,7 @@ const KIND_LABEL: Record<PathKind, string> = {
   'sparse-infill': 'FILL',
   support: 'SUPPORT',
   skirt: 'SKIRT',
+  ironing: 'IRONING',
 };
 
 export function generateGcode(layers: Layer[], opts: GcodeOptions): { gcode: string; stats: PrintStats } {
@@ -141,9 +142,12 @@ export function generateGcode(layers: Layer[], opts: GcodeOptions): { gcode: str
         out.push(`;TYPE:${KIND_LABEL[path.kind]}`);
         lastKind = path.kind;
       }
+      const ironing = path.kind === 'ironing';
       const speed = cap(
-        first ? s.firstLayerSpeed : path.kind === 'outer-wall' ? s.outerWallSpeed : s.printSpeed,
+        ironing ? s.ironingSpeed : first ? s.firstLayerSpeed : path.kind === 'outer-wall' ? s.outerWallSpeed : s.printSpeed,
       );
+      // Ironing lays down only a trickle of plastic to fill tiny gaps.
+      const flowHere = ironing ? ePerMm * (s.ironingFlow / 100) * (s.ironingSpacing / lw) : ePerMm;
       const feed = Math.round(speed * 60);
 
       travel(pts[0], pts[1]);
@@ -156,7 +160,7 @@ export function generateGcode(layers: Layer[], opts: GcodeOptions): { gcode: str
         const nx = pts[idx], ny = pts[idx + 1];
         const d = Math.hypot(nx - x, ny - y);
         if (d < 0.01) continue;
-        const de = d * ePerMm;
+        const de = d * flowHere;
         e += de;
         totalE += de;
         out.push(`G1 X${f3(nx)} Y${f3(ny)} E${f5(e)}${wroteFeed ? '' : ` F${feed}`}`);
