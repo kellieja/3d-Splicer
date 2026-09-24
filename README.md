@@ -18,9 +18,10 @@ and download G-code ready to print.
   infill (grid, lines, triangles), speeds, supports, skirt/brim, retraction and Z-hop.
 - **Split large prints:** models too big for your printer are cut into parts that fit,
   joined with **dowel pins** (a pin on one part, a matching hole in the other), laid on their
-  best side to need little support, and packed onto as few **plates** as possible.
-  Change the model size and the number of parts and plates updates live. Download one
-  G-code file per plate in a zip.
+  best side to need little support, and packed onto as few **plates** as possible (several
+  pieces per plate when they fit). Pick the number of pieces yourself or let it choose. Change
+  the model size and the number of pieces and plates updates live. Download all pieces as
+  **STL files** or one **G-code** file per plate, each as a zip.
 - **Layer preview:** step through every layer in 3D before you print.
 - **Estimates:** print time, filament length, weight and cost.
 - Reads **STL, OBJ and 3MF** files.
@@ -91,13 +92,18 @@ See [docs/EMBEDDING.md](docs/EMBEDDING.md) for more options.
 ## Splitting large prints
 
 1. Load your model and scale it to the size you want (step 3).
-2. If it's too big for the printer, click **Split it into parts that fit** (or open **5. Split large prints**).
-3. Check the **Parts** view: coloured parts and orange cut planes. Use the **−/+** buttons or type
-   cut positions to move cuts, for example away from fine details or onto flat areas.
-4. Adjust the **dowel joints**: pin diameter, pin length and the **fit gap** (make it larger if the
+2. In **5. Split into pieces**, answer **Yes** to "Split this model into pieces?".
+3. Choose **Auto** (the fewest pieces that fit your printer) or **Choose** and type how many pieces
+   you want. Under **Adjust cuts** you can also set the pieces per direction or move each cut.
+4. Check the **Pieces** view (coloured pieces with orange cut planes) and the **All plates** view
+   (every plate side by side, pieces lying flat; pieces share a plate when they fit).
+5. Adjust the **dowel joints** if needed: pin diameter, pin length and the **fit gap** (larger if
    pins are too tight on your printer, smaller if too loose).
-5. Check the **Plates** view, then click **Slice N plates** and download the zip.
+6. **Download pieces as STL (.zip)** to use another slicer, or click **Slice N plates** and download
+   one G-code file per plate.
 
+Separate bits (like an arm that doesn't touch the rest after a cut) become their own pieces, so
+nothing is left floating in the air. Tiny crumbs under 5 mm³ are left out.
 When assembling, push each pin into its matching hole, optionally with a drop of glue.
 If a joint face is too small or thin for a dowel, the app says so and you can just glue that joint.
 

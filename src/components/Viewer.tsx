@@ -27,6 +27,17 @@ export interface ViewerProps {
   layer: number;
   /** When this changes, the camera re-frames the bed and everything on it. */
   frameKey?: string;
+  /**
+   * Draw several copies of the bed (e.g. every plate side by side), each
+   * shifted by x/y mm and labelled. Default: one bed, no offset.
+   */
+  beds?: BedCopy[];
+}
+
+export interface BedCopy {
+  x: number;
+  y: number;
+  label?: string;
 }
 
 interface Scene {
@@ -44,7 +55,7 @@ interface Scene {
 
 
 /** Three.js view of the build plate, the model and the sliced toolpaths. Z is up. */
-export function Viewer({ printer, meshes, planes = [], preview, mode, layer, frameKey }: ViewerProps) {
+export function Viewer({ printer, meshes, planes = [], preview, mode, layer, frameKey, beds }: ViewerProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<Scene | null>(null);
 
@@ -118,9 +129,15 @@ export function Viewer({ printer, meshes, planes = [], preview, mode, layer, fra
   useEffect(() => {
     const s = sceneRef.current!;
     disposeChildren(s.bed);
-    s.bed.add(buildBed(printer));
+    const copies = beds ?? [{ x: 0, y: 0 }];
+    for (const c of copies) {
+      const bed = buildBed(printer, copies.length === 1);
+      bed.position.set(c.x, c.y, 0);
+      if (c.label) bed.add(labelSprite(c.label, printer));
+      s.bed.add(bed);
+    }
     s.render();
-  }, [printer]);
+  }, [printer, beds]);
 
   // Camera: frame the bed plus the model (which may be bigger than the bed).
   const meshesRef = useRef(meshes);
@@ -130,8 +147,10 @@ export function Viewer({ printer, meshes, planes = [], preview, mode, layer, fra
     const box = new THREE.Box3();
     const x0 = printer.originCenter ? -printer.bedX / 2 : 0;
     const y0 = printer.originCenter ? -printer.bedY / 2 : 0;
-    box.expandByPoint(new THREE.Vector3(x0, y0, 0));
-    box.expandByPoint(new THREE.Vector3(x0 + printer.bedX, y0 + printer.bedY, Math.min(printer.maxZ, 60)));
+    for (const c of beds ?? [{ x: 0, y: 0 }]) {
+      box.expandByPoint(new THREE.Vector3(x0 + c.x, y0 + c.y - 30, 0));
+      box.expandByPoint(new THREE.Vector3(x0 + c.x + printer.bedX, y0 + c.y + printer.bedY, Math.min(printer.maxZ, 60)));
+    }
     for (const m of meshesRef.current) {
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.BufferAttribute(m.positions, 3));
@@ -141,11 +160,15 @@ export function Viewer({ printer, meshes, planes = [], preview, mode, layer, fra
     const centre = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3()).length();
     s.controls.target.set(centre.x, centre.y, Math.min(centre.z, box.min.z + (box.max.z - box.min.z) * 0.4));
-    s.camera.position.set(centre.x + size * 0.15, centre.y - size * 1.0, centre.z + size * 0.65);
+    // Several plates: look down more steeply so all of them are visible.
+    const many = (beds?.length ?? 1) > 1;
+    s.camera.position.set(centre.x + size * 0.1, centre.y - size * (many ? 0.55 : 1.0), centre.z + size * (many ? 0.95 : 0.65));
     s.camera.far = size * 20;
     s.camera.updateProjectionMatrix();
     s.render();
-  }, [printer, frameKey]);
+    // `beds` changes identity whenever the plate count changes, which is also when we want to re-frame.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [printer, frameKey, beds?.length]);
 
   // Model meshes (one per part when the model is split).
   useEffect(() => {
@@ -222,15 +245,40 @@ export function Viewer({ printer, meshes, planes = [], preview, mode, layer, fra
 
 function disposeChildren(group: THREE.Group) {
   for (const child of [...group.children]) {
-    const o = child as THREE.Mesh;
-    o.geometry?.dispose();
-    const mat = o.material as THREE.Material | undefined;
-    mat?.dispose();
+    child.traverse((o) => {
+      const m = o as THREE.Mesh;
+      m.geometry?.dispose();
+      const mat = m.material as THREE.Material | THREE.Material[] | undefined;
+      for (const x of Array.isArray(mat) ? mat : mat ? [mat] : []) {
+        (x as THREE.MeshBasicMaterial).map?.dispose();
+        x.dispose();
+      }
+    });
     group.remove(child);
   }
 }
 
-function buildBed(p: PrinterProfile): THREE.Group {
+/** A flat text label lying on the bed, just in front of it. */
+function labelSprite(text: string, p: PrinterProfile): THREE.Mesh {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#f97316';
+  ctx.font = 'bold 72px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 256, 64);
+  const tex = new THREE.CanvasTexture(canvas);
+  const w = Math.min(p.bedX * 0.6, 120);
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, w / 4), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }));
+  const x0 = p.originCenter ? -p.bedX / 2 : 0;
+  const y0 = p.originCenter ? -p.bedY / 2 : 0;
+  mesh.position.set(x0 + p.bedX / 2, y0 - w / 8 - 4, 0.1);
+  return mesh;
+}
+
+function buildBed(p: PrinterProfile, withVolume = true): THREE.Group {
   const g = new THREE.Group();
   const x0 = p.originCenter ? -p.bedX / 2 : 0;
   const y0 = p.originCenter ? -p.bedY / 2 : 0;
@@ -268,6 +316,8 @@ function buildBed(p: PrinterProfile): THREE.Group {
   const grid = new THREE.BufferGeometry();
   grid.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
   g.add(new THREE.LineSegments(grid, new THREE.LineBasicMaterial({ color: 0x4b5563 })));
+
+  if (!withVolume) return g;
 
   // Build volume outline.
   const volMat = new THREE.LineBasicMaterial({ color: 0x64748b, transparent: true, opacity: 0.5 });
