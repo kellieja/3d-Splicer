@@ -1,5 +1,5 @@
 import type { ModelTransform } from '../types';
-import { NumberField, Section, Toggle } from './fields';
+import { Advanced, NumberField, Section, SimpleOnly, Toggle } from './fields';
 
 interface Props {
   transform: ModelTransform;
@@ -41,16 +41,24 @@ export function TransformPanel({ transform: t, onChange, size, uniform, onUnifor
   };
 
   return (
-    <Section title="3. Scale & position" badge={`${Math.round(t.scale[0] * 100)}%`}>
-      <Toggle label="Keep proportions (uniform scale)" checked={uniform} onChange={onUniformChange} />
+    <Section title="3. Size" badge={`${Math.round(t.scale[0] * 100)}%`}>
+      <SimpleOnly>
+        <NumberField label="Scale" unit="%" step={5} min={1} max={10000} value={+(t.scale[0] * 100).toFixed(2)} onChange={(v) => setScale(0, v / 100)} />
+      </SimpleOnly>
+      <Advanced>
+        <Toggle label="Keep proportions (uniform scale)" checked={uniform} onChange={onUniformChange} />
+        <div className="grid3">
+          {AXES.map((a, i) => (
+            <NumberField key={`s${a}`} label={`Scale ${a}`} unit="%" step={5} min={1} max={10000} value={+(t.scale[i] * 100).toFixed(2)} onChange={(v) => setScale(i, v / 100)} />
+          ))}
+        </div>
+      </Advanced>
       <div className="grid3">
-        {AXES.map((a, i) => (
-          <NumberField key={`s${a}`} label={`Scale ${a}`} unit="%" step={5} min={1} max={10000} value={+(t.scale[i] * 100).toFixed(2)} onChange={(v) => setScale(i, v / 100)} />
-        ))}
         {AXES.map((a, i) => (
           <NumberField key={`d${a}`} label={`Size ${a}`} unit="mm" step={1} min={0.1} max={5000} value={+size[i].toFixed(2)} onChange={(v) => setSize(i, v)} />
         ))}
       </div>
+      <Advanced>
       <div className="field">
         <label>Rotate</label>
         <div className="row">
@@ -70,6 +78,7 @@ export function TransformPanel({ transform: t, onChange, size, uniform, onUnifor
         <NumberField label="Move X" unit="mm" value={t.offset[0]} onChange={(v) => onChange({ ...t, offset: [v, t.offset[1]] })} />
         <NumberField label="Move Y" unit="mm" value={t.offset[1]} onChange={(v) => onChange({ ...t, offset: [t.offset[0], v] })} />
       </div>
+      </Advanced>
       <div className="row">
         <button className="btn ghost" onClick={onFit}>Scale to fit bed</button>
         <button className="btn ghost" onClick={onReset}>Reset</button>

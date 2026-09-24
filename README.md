@@ -100,21 +100,24 @@ See [docs/EMBEDDING.md](docs/EMBEDDING.md) for more options.
 | `src/workers/`              | Runs the slicer off the main thread                           |
 | `tests/`                    | Vitest tests for the slicer                                   |
 
+## Using it
+
+The app walks you through six steps: **1 Model → 2 Printer → 3 Size → 4 Split → 5 Settings → 6 Download**.
+Use **Next / Back** or click a step number. The **Simple / Advanced** switch at the top shows just
+the basics, or every setting (temperatures, walls, speeds, seam, ironing, variable layers, cut
+positions and tilts, dowel sizes, custom printers…).
+
 ## Splitting large prints
 
-1. Load your model and scale it to the size you want (step 3).
-2. In **5. Split into pieces**, answer **Yes** to "Split this model into pieces?".
-3. Choose **Auto** (the fewest pieces that fit your printer) or **Choose** and type how many pieces
-   you want. Under **Adjust cuts** you can also set the pieces per direction, move each cut, or
-   **tilt** a cut (up to 60°) to follow a slope or hide the seam.
-4. Check the **Pieces** view (coloured pieces with orange cut planes) and the **All plates** view
-   (every plate side by side, pieces lying flat; pieces share a plate when they fit).
-5. Adjust the **dowel joints** if needed: pin diameter, pin length and the **fit gap** (larger if
-   pins are too tight on your printer, smaller if too loose).
-6. **Download pieces as STL (.zip)** to use another slicer, or click **Slice N plates** and download
-   one G-code file per plate.
-7. **Assembly guide (PDF)** gives you a printable page with every piece numbered, the plate it's on,
-   which pieces it joins and a checkbox to tick off as you go.
+1. **Model:** open your file (or drag it onto the 3D view).
+2. **Printer:** choose your printer and filament.
+3. **Size:** set the size you want. If it's bigger than your printer, that's fine.
+4. **Split:** answer **Yes**, then choose **Auto** (fewest pieces that fit) or **Choose** a number.
+   The **All plates** view shows every plate side by side with the pieces lying flat.
+   In **Advanced** you can move or tilt cuts (up to 60°) and change the dowel pins.
+5. **Settings:** pick a quality preset and infill.
+6. **Download:** slice and download the G-code (one file per plate), the pieces as STL files,
+   a printable **assembly guide (PDF)** with every piece numbered, or a project for another slicer.
 
 Separate bits (like an arm that doesn't touch the rest after a cut) become their own pieces, so
 nothing is left floating in the air. Tiny crumbs under 5 mm³ are left out.
@@ -123,7 +126,7 @@ If a joint face is too small or thin for a dowel, the app says so and you can ju
 
 ## Exporting to another slicer
 
-In **6. Save & export**, click **Export project for other slicers (.zip)**. Inside:
+In step **6 Download**, click **Project for another slicer (.zip)**. Inside:
 
 | File | What it's for |
 | --- | --- |
@@ -136,8 +139,8 @@ In **6. Save & export**, click **Export project for other slicers (.zip)**. Insi
 
 Supports are turned **off** in the exported settings so you can add your own (normal, tree or painted).
 
-**Save project (.splicer)** keeps the model and all your choices; open it again with **Open project…**
-(or just open the `.splicer` file like a model).
+**Save project** keeps the model and all your choices in a `.splicer` file; open it again with
+**Open project…** (or just open the `.splicer` file like a model).
 
 ## Printer notes
 

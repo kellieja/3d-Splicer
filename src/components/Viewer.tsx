@@ -159,10 +159,29 @@ export function Viewer({ printer, meshes, planes = [], preview, mode, layer, fra
     }
     const centre = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3()).length();
-    s.controls.target.set(centre.x, centre.y, Math.min(centre.z, box.min.z + (box.max.z - box.min.z) * 0.4));
-    // Several plates: look down more steeply so all of them are visible.
+    // Several plates: look down steeply so every plate is visible side by side.
     const many = (beds?.length ?? 1) > 1;
-    s.camera.position.set(centre.x + size * 0.1, centre.y - size * (many ? 0.55 : 1.0), centre.z + size * (many ? 0.95 : 0.65));
+    const dir = new THREE.Vector3(many ? 0.05 : 0.15, many ? -0.5 : -1, many ? 1 : 0.65).normalize();
+    // Fit the whole box in view, leaving the bottom quarter free for the Slice panel.
+    const cam = s.camera;
+    cam.aspect = Math.max(0.2, cam.aspect);
+    const tanV = Math.tan(((cam.fov / 2) * Math.PI) / 180);
+    const tanH = tanV * cam.aspect;
+    const usableV = 0.72;
+    const forward = dir.clone().negate();
+    const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 0, 1)).normalize();
+    const up = new THREE.Vector3().crossVectors(right, forward).normalize();
+    let dist = 1;
+    for (const x of [box.min.x, box.max.x])
+      for (const y of [box.min.y, box.max.y])
+        for (const z of [box.min.z, box.max.z]) {
+          const rel = new THREE.Vector3(x, y, z).sub(centre);
+          const depth = rel.dot(dir); // towards the camera
+          dist = Math.max(dist, depth + Math.abs(rel.dot(right)) / (tanH * 0.94), depth + Math.abs(rel.dot(up)) / (tanV * usableV));
+        }
+    const target = centre.clone().addScaledVector(up, -dist * tanV * (1 - usableV) * 0.9);
+    s.controls.target.copy(target);
+    cam.position.copy(target).addScaledVector(dir, dist);
     s.camera.far = size * 20;
     s.camera.updateProjectionMatrix();
     s.render();

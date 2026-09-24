@@ -1,5 +1,5 @@
 import type { Cuts, CutTilts, DowelOptions, SplitResult } from '../slicer/split';
-import { NumberField, Section, Toggle } from './fields';
+import { Advanced, NumberField, Section, Toggle } from './fields';
 
 interface Props {
   enabled: boolean;
@@ -28,8 +28,6 @@ interface Props {
   result: SplitResult | null;
   busy: boolean;
   error: string | null;
-  onDownloadStl: () => void;
-  onDownloadGuide: () => void;
 }
 
 const AXES = ['X', 'Y', 'Z'] as const;
@@ -61,7 +59,7 @@ export function SplitPanel(p: Props) {
   const mode = p.manual ? 'custom' : p.pieces === null ? 'auto' : 'count';
 
   return (
-    <Section title="5. Split into pieces" badge={badge} defaultOpen={p.tooBig || p.enabled}>
+    <Section title="4. Split into pieces" badge={badge} defaultOpen={p.tooBig || p.enabled}>
       {p.tooBig && !p.enabled && (
         <p className="note small">
           This model is too big for the printer in one piece. Choose <strong>Yes</strong> to cut it into pieces
@@ -137,15 +135,7 @@ export function SplitPanel(p: Props) {
           {p.error && <p className="error small">Splitting failed: {p.error}</p>}
           {r?.warnings.map((w) => <p key={w} className="warning small">{w}</p>)}
 
-          <div className="row">
-            <button className="btn" disabled={!r || p.busy} onClick={p.onDownloadStl}>
-              Download pieces as STL (.zip)
-            </button>
-            <button className="btn" disabled={!r || p.busy} onClick={p.onDownloadGuide}>
-              Assembly guide (PDF)
-            </button>
-          </div>
-
+          <Advanced>
           <details className="subsection" open={p.manual}>
             <summary>Adjust cuts</summary>
             <p className="muted small">
@@ -203,6 +193,7 @@ export function SplitPanel(p: Props) {
 
           <Toggle label="Lay each piece flat on its best side" checked={p.autoOrient} onChange={p.onAutoOrientChange} />
           <Toggle label="Add supports where still needed" checked={p.supports} onChange={p.onSupportsChange} />
+          </Advanced>
         </>
       )}
     </Section>

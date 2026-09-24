@@ -33,7 +33,7 @@ import { TransformPanel } from './components/TransformPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { SplitPanel } from './components/SplitPanel';
 import { ResultPanel } from './components/ResultPanel';
-import { Section } from './components/fields';
+import { Section, UiContext } from './components/fields';
 
 interface LoadedModel {
   name: string;
@@ -41,6 +41,8 @@ interface LoadedModel {
 }
 
 type View = 'model' | 'plates' | 'layers';
+
+const STEPS = ['Model', 'Printer', 'Size', 'Split', 'Settings', 'Download'];
 
 const LEGEND: [keyof typeof KIND_COLORS, string][] = [
   ['outer-wall', 'Outer wall'],
@@ -228,6 +230,9 @@ export default function App() {
   // ── Slicing ─────────────────────────────────────────────────────────────
   const slicer = useSlicer();
   const [view, setView] = useState<View>('model');
+  const [step, setStep] = useState(0);
+  const [advanced, setAdvanced] = useState<boolean>(() => loadJSON('advanced', false));
+  useEffect(() => saveJSON('advanced', advanced), [advanced]);
   const [plateIndex, setPlateIndex] = useState(0);
   const [layer, setLayer] = useState(0);
   const { clear } = slicer;
@@ -356,8 +361,9 @@ export default function App() {
     const n = splitResult.plates.length;
     const cols = Math.ceil(Math.sqrt(n));
     const rows = Math.ceil(n / cols);
-    const sx = printer.bedX + Math.max(30, printer.bedX * 0.15);
-    const sy = printer.bedY + Math.max(50, printer.bedY * 0.25);
+    // Clear space between plates (and room for each plate's label in front).
+    const sx = printer.bedX * 1.35 + 20;
+    const sy = printer.bedY * 1.45 + 40;
     return splitResult.plates.map((_, i) => ({
       x: (i % cols) * sx,
       y: (rows - 1 - Math.floor(i / cols)) * sy,
@@ -441,133 +447,206 @@ export default function App() {
           <span>3D Splicer</span>
           <span className="tag">open-source slicer</span>
         </div>
-        <a className="gh" href="https://github.com/kellieja/3d-splicer" target="_blank" rel="noreferrer">GitHub</a>
+        <div className="topbar-right">
+          <div className="segmented mode-switch" role="radiogroup" aria-label="Settings shown">
+            <button role="radio" aria-checked={!advanced} className={!advanced ? 'on' : ''} onClick={() => setAdvanced(false)}>Simple</button>
+            <button role="radio" aria-checked={advanced} className={advanced ? 'on' : ''} onClick={() => setAdvanced(true)}>Advanced</button>
+          </div>
+          <a className="gh" href="https://github.com/kellieja/3d-splicer" target="_blank" rel="noreferrer">GitHub</a>
+        </div>
       </header>
 
       <main className="layout">
+        <UiContext.Provider value={{ advanced, flat: true }}>
         <aside className="sidebar">
-          <Section title="Model" badge={model ? `${size[0].toFixed(0)}×${size[1].toFixed(0)}×${size[2].toFixed(0)} mm` : undefined}>
-            <button className="btn primary wide" onClick={() => fileInput.current?.click()}>
-              Open 3D model…
-            </button>
-            <input
-              ref={fileInput}
-              type="file"
-              accept={[...SUPPORTED_EXTENSIONS, PROJECT_EXTENSION].join(',')}
-              hidden
-              onChange={(e) => {
-                handleFile(e.target.files?.[0]);
-                e.target.value = '';
-              }}
-            />
-            <p className="muted small">
-              STL, OBJ or 3MF, or a saved 3D Splicer project ({PROJECT_EXTENSION}). Your file never leaves your computer:
-              slicing runs in your browser.
-            </p>
-            <div className="row">
-              <button className="btn ghost small" onClick={() => openModel('calibration-cube.stl', makeCube(20))}>Sample: 20 mm cube</button>
-              <button className="btn ghost small" onClick={() => openModel('sample-tower.stl', makeSampleTower())}>Sample: tower</button>
-            </div>
-            {model && <p className="small">Loaded <strong>{model.name}</strong> · {(model.source.length / 9).toLocaleString()} triangles</p>}
-            {loadError && <p className="error small">{loadError}</p>}
-          </Section>
-
-          <PrinterPanel
-            printers={printers}
-            printer={printer}
-            onSelect={selectPrinter}
-            onSaveCustom={(p) => {
-              setCustomPrinters((list) => [...list.filter((x) => x.id !== p.id), p]);
-              selectPrinter(p.id);
-              setSettings((s) => ({ ...s, nozzleDiameter: p.nozzleDiameter }));
-            }}
-            onDeleteCustom={(id) => {
-              setCustomPrinters((list) => list.filter((x) => x.id !== id));
-              setPrinterId(DEFAULT_PRINTER_ID);
+          <input
+            ref={fileInput}
+            type="file"
+            accept={[...SUPPORTED_EXTENSIONS, PROJECT_EXTENSION].join(',')}
+            hidden
+            onChange={(e) => {
+              handleFile(e.target.files?.[0]);
+              e.target.value = '';
             }}
           />
+          <nav className="steps" aria-label="Steps">
+            {STEPS.map((title, i) => (
+              <button
+                key={title}
+                className={`step${i === step ? ' on' : ''}${i < step ? ' done' : ''}`}
+                aria-current={i === step ? 'step' : undefined}
+                disabled={i > 0 && !model}
+                onClick={() => setStep(i)}
+              >
+                <span className="step-n">{i + 1}</span>
+                <span className="step-t">{title}</span>
+              </button>
+            ))}
+          </nav>
 
-          <FilamentPanel
-            filaments={BUILTIN_FILAMENTS}
-            filament={filament}
-            onSelect={setFilamentId}
-            onChange={(f) => setFilamentEdits((e) => ({ ...e, [f.id]: f }))}
-            modified={!!filamentEdits[filament.id]}
-            onReset={() =>
-              setFilamentEdits((e) => {
-                const next = { ...e };
-                delete next[filament.id];
-                return next;
-              })
-            }
-          />
+          <div className="step-body">
+            {step === 0 && (
+              <Section title="Model" badge={model ? `${size[0].toFixed(0)}×${size[1].toFixed(0)}×${size[2].toFixed(0)} mm` : undefined}>
+                <button className="btn primary wide big" onClick={() => fileInput.current?.click()}>
+                  Open 3D model…
+                </button>
+                <p className="muted small">
+                  STL, OBJ or 3MF, or a saved 3D Splicer project ({PROJECT_EXTENSION}). You can also drag a file onto the
+                  3D view. Your file never leaves your computer.
+                </p>
+                <div className="row">
+                  <button className="btn ghost small" onClick={() => openModel('calibration-cube.stl', makeCube(20))}>Try a 20 mm cube</button>
+                  <button className="btn ghost small" onClick={() => openModel('sample-tower.stl', makeSampleTower())}>Try a tower</button>
+                </div>
+                {model && <p className="small">Loaded <strong>{model.name}</strong> · {(model.source.length / 9).toLocaleString()} triangles</p>}
+                {loadError && <p className="error small">{loadError}</p>}
+              </Section>
+            )}
 
-          <TransformPanel
-            transform={transform}
-            onChange={(t) => {
-              setTransform(t);
-              setManualCuts(null);
-            }}
-            size={size}
-            uniform={uniform}
-            onUniformChange={setUniform}
-            onFit={fitToBed}
-            onReset={() => {
-              setTransform(IDENTITY_TRANSFORM);
-              setManualCuts(null);
-            }}
-          />
+            {step === 1 && (
+              <>
+                <PrinterPanel
+                  printers={printers}
+                  printer={printer}
+                  onSelect={selectPrinter}
+                  onSaveCustom={(p) => {
+                    setCustomPrinters((list) => [...list.filter((x) => x.id !== p.id), p]);
+                    selectPrinter(p.id);
+                    setSettings((s) => ({ ...s, nozzleDiameter: p.nozzleDiameter }));
+                  }}
+                  onDeleteCustom={(id) => {
+                    setCustomPrinters((list) => list.filter((x) => x.id !== id));
+                    setPrinterId(DEFAULT_PRINTER_ID);
+                  }}
+                />
+                <FilamentPanel
+                  filaments={BUILTIN_FILAMENTS}
+                  filament={filament}
+                  onSelect={setFilamentId}
+                  onChange={(f) => setFilamentEdits((e) => ({ ...e, [f.id]: f }))}
+                  modified={!!filamentEdits[filament.id]}
+                  onReset={() =>
+                    setFilamentEdits((e) => {
+                      const next = { ...e };
+                      delete next[filament.id];
+                      return next;
+                    })
+                  }
+                />
+              </>
+            )}
 
-          <SettingsPanel settings={settings} onChange={setSettings} layerInfo={layerInfo} />
+            {step === 2 && (
+              <>
+                <TransformPanel
+                  transform={transform}
+                  onChange={(t) => {
+                    setTransform(t);
+                    setManualCuts(null);
+                  }}
+                  size={size}
+                  uniform={uniform}
+                  onUniformChange={setUniform}
+                  onFit={fitToBed}
+                  onReset={() => {
+                    setTransform(IDENTITY_TRANSFORM);
+                    setManualCuts(null);
+                  }}
+                />
+                {fitProblems.length > 0 && !splitOn && (
+                  <p className="note small">
+                    At this size the model is too big for your printer. That's fine: in the next step it can be split into
+                    pieces that fit.
+                  </p>
+                )}
+              </>
+            )}
 
-          <SplitPanel
-            enabled={splitOn}
-            onEnabledChange={enableSplit}
-            tooBig={fitProblems.length > 0}
-            pieces={pieces}
-            onPiecesChange={(n) => {
-              setPieces(n);
-              setManualCuts(null);
-            }}
-            minimumPieces={minimumPieces}
-            cuts={cuts}
-            tilts={tiltsFor(cuts, tilts)}
-            onTiltsChange={(t) => {
-              if (!manualCuts) setManualCuts(cuts);
-              setTilts(t);
-            }}
-            manual={!!manualCuts}
-            onCutsChange={setManualCuts}
-            onDownloadStl={downloadStl}
-            onDownloadGuide={downloadGuide}
-            size={size}
-            dowels={dowels}
-            onDowelsChange={setDowels}
-            autoOrient={autoOrient}
-            onAutoOrientChange={setAutoOrient}
-            supports={settings.supports}
-            onSupportsChange={(v) => setSettings((s) => ({ ...s, supports: v }))}
-            result={splitResult}
-            busy={split.busy}
-            error={splitOn ? split.error : null}
-          />
+            {step === 3 && (
+              <>
+                {fitProblems.length === 0 && !splitOn && (
+                  <p className="note small">Your model fits your printer in one piece, so you don't need to split it.</p>
+                )}
+                <SplitPanel
+                  enabled={splitOn}
+                  onEnabledChange={enableSplit}
+                  tooBig={fitProblems.length > 0}
+                  pieces={pieces}
+                  onPiecesChange={(n) => {
+                    setPieces(n);
+                    setManualCuts(null);
+                  }}
+                  minimumPieces={minimumPieces}
+                  cuts={cuts}
+                  tilts={tiltsFor(cuts, tilts)}
+                  onTiltsChange={(t) => {
+                    if (!manualCuts) setManualCuts(cuts);
+                    setTilts(t);
+                  }}
+                  manual={!!manualCuts}
+                  onCutsChange={setManualCuts}
+                  size={size}
+                  dowels={dowels}
+                  onDowelsChange={setDowels}
+                  autoOrient={autoOrient}
+                  onAutoOrientChange={setAutoOrient}
+                  supports={settings.supports}
+                  onSupportsChange={(v) => setSettings((s) => ({ ...s, supports: v }))}
+                  result={splitResult}
+                  busy={split.busy}
+                  error={splitOn ? split.error : null}
+                />
+              </>
+            )}
 
-          <Section title="6. Save & export" defaultOpen={!!model}>
-            <button className="btn primary wide" disabled={!canExport} onClick={exportForSlicers}>
-              Export project for other slicers (.zip)
-            </button>
-            <p className="muted small">
-              {splitOn ? 'Every plate' : 'Your model'} as a 3MF project, plus your printer, filament and print settings, with
-              supports <strong>off</strong> so you can add your own. Opens in Bambu Studio, OrcaSlicer, PrusaSlicer, Cura,
-              Creality Print and other slicers: see “HOW TO OPEN.txt” inside.
-            </p>
-            <div className="row">
-              <button className="btn" disabled={!model} onClick={saveProjectFile}>Save project ({PROJECT_EXTENSION})</button>
-              <button className="btn ghost" onClick={() => fileInput.current?.click()}>Open project…</button>
-            </div>
-            <p className="muted small">A 3D Splicer project keeps your model, size, printer, filament, cuts and settings so you can carry on later.</p>
-          </Section>
+            {step === 4 && <SettingsPanel settings={settings} onChange={setSettings} layerInfo={layerInfo} />}
+
+            {step === 5 && (
+              <Section title="Slice & download">
+                {!results ? (
+                  <>
+                    <button className="btn primary wide big" disabled={!canSlice || slicer.busy} onClick={startSlice}>
+                      {slicer.busy ? 'Slicing…' : plateCount > 1 ? `Slice ${plateCount} plates` : 'Slice'}
+                    </button>
+                    <p className="muted small">Slicing makes the G-code file your printer reads.</p>
+                  </>
+                ) : (
+                  <button className="btn primary wide big" onClick={download}>
+                    {results.length > 1 ? `Download G-code for ${results.length} plates (.zip)` : 'Download G-code'}
+                  </button>
+                )}
+                {splitOn && splitResult && (
+                  <div className="download-list">
+                    <button className="btn wide" disabled={split.busy} onClick={downloadGuide}>Assembly guide (PDF)</button>
+                    <button className="btn wide" disabled={split.busy} onClick={downloadStl}>Pieces as STL files (.zip)</button>
+                  </div>
+                )}
+                <div className="download-list">
+                  <button className="btn wide" disabled={!canExport} onClick={exportForSlicers}>Project for another slicer (.zip)</button>
+                  <p className="muted small">
+                    Opens in Bambu Studio, OrcaSlicer, PrusaSlicer, Cura and others, with supports off so you can add your own.
+                  </p>
+                  <div className="row">
+                    <button className="btn" disabled={!model} onClick={saveProjectFile}>Save project</button>
+                    <button className="btn ghost" onClick={() => fileInput.current?.click()}>Open project…</button>
+                  </div>
+                  <p className="muted small">Save your model and every choice ({PROJECT_EXTENSION} file) to carry on later.</p>
+                </div>
+              </Section>
+            )}
+          </div>
+
+          <div className="step-footer">
+            <button className="btn ghost" disabled={step === 0} onClick={() => setStep((s) => Math.max(0, s - 1))}>← Back</button>
+            <span className="muted small">Step {step + 1} of {STEPS.length}</span>
+            {step < STEPS.length - 1 ? (
+              <button className="btn primary" disabled={!model} onClick={() => setStep((s) => Math.min(STEPS.length - 1, s + 1))}>Next →</button>
+            ) : (
+              <span />
+            )}
+          </div>
         </aside>
+        </UiContext.Provider>
 
         <section
           className={`stage${dragging ? ' dragging' : ''}`}
@@ -645,7 +724,15 @@ export default function App() {
               <p key={w} className={fitProblems.includes(w) ? 'error small' : 'warning small'}>{w}</p>
             ))}
             {!splitOn && fitProblems.length > 0 && (
-              <button className="btn ghost small" onClick={() => enableSplit(true)}>Split it into pieces that fit</button>
+              <button
+                className="btn ghost small"
+                onClick={() => {
+                  enableSplit(true);
+                  setStep(3);
+                }}
+              >
+                Split it into pieces that fit
+              </button>
             )}
             {slicer.error && <p className="error small">Slicing failed: {slicer.error}</p>}
             {guideError && <p className="error small">Assembly guide failed: {guideError}</p>}

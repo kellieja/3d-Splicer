@@ -1,5 +1,5 @@
 import type { FilamentProfile } from '../types';
-import { NumberField, Section, SelectField } from './fields';
+import { Advanced, NumberField, Section, SelectField } from './fields';
 
 interface Props {
   filaments: FilamentProfile[];
@@ -21,6 +21,7 @@ export function FilamentPanel({ filaments, filament: f, onSelect, onChange, onRe
         onChange={onSelect}
         options={filaments.map((x) => ({ value: x.id, label: x.name, group: x.material }))}
       />
+      <Advanced>
       <div className="grid2">
         <NumberField label="Nozzle temp" unit="°C" value={f.nozzleTemp} min={150} max={450} onChange={(v) => set('nozzleTemp', v)} />
         <NumberField label="First layer temp" unit="°C" value={f.firstLayerNozzleTemp} min={150} max={450} onChange={(v) => set('firstLayerNozzleTemp', v)} />
@@ -32,6 +33,7 @@ export function FilamentPanel({ filaments, filament: f, onSelect, onChange, onRe
       {modified && (
         <button className="btn ghost small" onClick={onReset}>Reset to defaults</button>
       )}
+      </Advanced>
     </Section>
   );
 }
