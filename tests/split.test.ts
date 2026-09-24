@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { makeCube, makeSampleTower, placeOnBed, computeBounds, IDENTITY_TRANSFORM } from '../src/slicer/mesh';
-import { autoCuts, splitModel, plateSoup, meshVolume, DEFAULT_DOWELS, type Cuts } from '../src/slicer/split';
+import { autoCuts, cutsForPieceCount, connectedComponents, splitModel, plateSoup, meshVolume, DEFAULT_DOWELS, type Cuts } from '../src/slicer/split';
 import { sliceMesh } from '../src/slicer/slice';
 import { area } from '../src/slicer/geometry';
 import { slice } from '../src/slicer';
@@ -129,7 +129,56 @@ describe('splitModel', () => {
     // Only the small corner joints (near the curved surface) should be left without dowels.
     const joints = r.dowels > 0 ? r.warnings.length : Infinity;
     expect(joints).toBeLessThanOrEqual(8);
+    // Pieces on the same plate never overlap.
+    for (const plate of r.plates) {
+      const boxes = plate.parts.map((pp) => computeBounds(pp.positions));
+      for (let i = 0; i < boxes.length; i++)
+        for (let j = i + 1; j < boxes.length; j++) {
+          const a = boxes[i], b = boxes[j];
+          const overlap = a.min[0] < b.max[0] - 0.01 && b.min[0] < a.max[0] - 0.01 && a.min[1] < b.max[1] - 0.01 && b.min[1] < a.max[1] - 0.01;
+          expect(overlap).toBe(false);
+        }
+    }
     expect(r.dowels).toBeGreaterThanOrEqual(30);
+  });
+
+  it('places separate bits as their own pieces, flat on the plate', () => {
+    // Two blocks side by side plus one block hovering above (like an arm): a cut leaves separate bits.
+    const cube = (x: number, y: number, z: number, s: number) => {
+      const c = makeCube(s);
+      for (let i = 0; i < c.length; i += 3) { c[i] += x; c[i + 1] += y; c[i + 2] += z; }
+      return c;
+    };
+    const blocks = [cube(0, 0, 0, 60), cube(100, 0, 0, 60), cube(100, 0, 120, 60)];
+    const model = new Float32Array(blocks.reduce((n, b) => n + b.length, 0));
+    let o = 0;
+    for (const b of blocks) { model.set(b, o); o += b.length; }
+    const placedModel = placeOnBed(model, IDENTITY_TRANSFORM, ender);
+    const r = splitModel(placedModel, { ...opts, cuts: [[], [], []] });
+    expect(r.parts.length).toBe(3);
+    // Everything rests on the bed, and small pieces share plates.
+    for (const plate of r.plates) for (const pp of plate.parts) expect(computeBounds(pp.positions).min[2]).toBeCloseTo(0);
+    expect(r.plates.length).toBe(1);
+  });
+
+  it('finds connected pieces', () => {
+    const a = makeCube(10);
+    const b = makeCube(10).map((v, i) => (i % 3 === 0 ? v + 50 : v));
+    const both = new Float32Array([...a, ...b]);
+    expect(connectedComponents(both).length).toBe(2);
+    expect(connectedComponents(a).length).toBe(1);
+  });
+
+  it('cuts into the number of pieces asked for', () => {
+    const size: [number, number, number] = [180, 100, 60];
+    const four = cutsForPieceCount(size, ender, settings, DEFAULT_DOWELS, 4);
+    expect(four.minimum).toBe(1);
+    expect(four.cuts.reduce((n, l) => n * (l.length + 1), 1)).toBe(4);
+    expect(four.cuts[0].length).toBeGreaterThanOrEqual(1); // longest side gets cut first
+    // Never fewer pieces than the printer needs.
+    const tooFew = cutsForPieceCount([300, 300, 300], ender, settings, DEFAULT_DOWELS, 2);
+    expect(tooFew.minimum).toBe(8);
+    expect(tooFew.cuts.reduce((n, l) => n * (l.length + 1), 1)).toBe(8);
   });
 
   it('needs fewer plates on a bigger printer', () => {
@@ -145,5 +194,16 @@ describe('splitModel', () => {
     expect(r.parts.length).toBe(3);
     expect(r.dowels).toBeGreaterThanOrEqual(2);
     for (const p of r.parts) expect(meshVolume(p.positions)).toBeGreaterThan(0);
+  });
+});
+
+describe('STL export', () => {
+  it('writes a valid binary STL that loads back', async () => {
+    const { toBinaryStl } = await import('../src/lib/stl');
+    const { STLLoader } = await import('three/examples/jsm/loaders/STLLoader.js');
+    const bytes = toBinaryStl(makeCube(20), 'cube');
+    expect(bytes.length).toBe(84 + 12 * 50);
+    const geo = new STLLoader().parse(bytes.buffer as ArrayBuffer);
+    expect(geo.getAttribute('position').count).toBe(36);
   });
 });

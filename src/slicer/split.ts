@@ -69,6 +69,9 @@ export interface SplitResult {
   warnings: string[];
 }
 
+/** Pieces smaller than this (mm³) are crumbs left by a cut and are dropped. */
+const MIN_PIECE_VOLUME = 5;
+
 export const DEFAULT_DOWELS: DowelOptions = { enabled: true, diameter: 6, length: 8, tolerance: 0.3 };
 
 const HOLE_EXTRA_DEPTH = 0.6;
@@ -107,10 +110,42 @@ export function autoCuts(size: [number, number, number], printer: PrinterProfile
   const a = plateArea(printer, s);
   const pin = dowels.enabled ? dowels.length : 0;
   const limits = [a.w - pin, a.h - pin, printer.maxZ - pin];
-  return [0, 1, 2].map((i) => {
-    const n = Math.max(1, Math.ceil(size[i] / Math.max(10, limits[i]) - 1e-6));
-    return Array.from({ length: n - 1 }, (_, k) => +(((k + 1) * size[i]) / n).toFixed(2));
-  }) as Cuts;
+  return evenCuts(size, [0, 1, 2].map((i) => Math.max(1, Math.ceil(size[i] / Math.max(10, limits[i]) - 1e-6))));
+}
+
+/** Evenly spaced cuts (relative to the model's minimum corner) for a grid of counts. */
+function evenCuts(size: [number, number, number], counts: number[]): Cuts {
+  return [0, 1, 2].map((i) =>
+    Array.from({ length: counts[i] - 1 }, (_, k) => +(((k + 1) * size[i]) / counts[i]).toFixed(2)),
+  ) as Cuts;
+}
+
+/**
+ * Cuts for roughly `pieces` grid cells, never fewer than needed to fit the
+ * printer. Cuts go across the longest directions first so pieces stay chunky.
+ * Returns the cuts and the minimum number of pieces this printer needs.
+ */
+export function cutsForPieceCount(
+  size: [number, number, number],
+  printer: PrinterProfile,
+  s: PrintSettings,
+  dowels: DowelOptions,
+  pieces: number,
+): { cuts: Cuts; minimum: number } {
+  const min = autoCuts(size, printer, s, dowels).map((l) => l.length + 1);
+  const minimum = min[0] * min[1] * min[2];
+  const target = Math.max(minimum, Math.round(pieces));
+  let best = min, bestScore = Infinity;
+  for (let nx = min[0]; nx <= target; nx++)
+    for (let ny = min[1]; nx * ny <= target * 2; ny++)
+      for (let nz = min[2]; nx * ny * nz <= target * 2; nz++) {
+        const n = nx * ny * nz;
+        const miss = n >= target ? n - target : (target - n) * 1.5;
+        const chunk = Math.max(size[0] / nx, size[1] / ny, size[2] / nz);
+        const score = miss * 1e6 + chunk;
+        if (score < bestScore) { bestScore = score; best = [nx, ny, nz]; }
+      }
+  return { cuts: evenCuts(size, best), minimum };
 }
 
 // ─── Coordinates on a cut plane ─────────────────────────────────────────
@@ -492,7 +527,8 @@ function orientationScore(soup: Float32Array, pinDirs: number[][], f: Rot, s: Pr
     if (dz < -0.5) pins += 1e9; // a pin pointing into the bed can't be printed
     else if (dz < 0.5) pins += d.diameter * d.length; // sideways pins need a little support
   }
-  return overhang + pins - contact * 0.05;
+  // Strongly prefer lying on a big flat face (usually a cut face) so parts sit flat on the plate.
+  return overhang + pins - contact * 0.5;
 }
 
 // ─── Packing ────────────────────────────────────────────────────────────
@@ -571,9 +607,31 @@ export function splitModel(positions: TriangleSoup, opts: SplitOptions): SplitRe
 
   const parts: SplitPart[] = [];
   const oriented: Float32Array[] = [];
-  work.forEach((p, i) => {
-    const geom = finalGeometry(p, d);
-    const pinDirs = p.pins.map((j) => fromUVW(j.axis, 0, 0, 1));
+  let crumbs = 0;
+  // A cut can leave a part in several separate pieces (e.g. two legs in one
+  // grid cell). Each piece is placed on its own so nothing floats in the air.
+  const pieces: { work: WorkPart; geom: Float32Array }[] = [];
+  for (const p of work) {
+    for (const geom of connectedComponents(finalGeometry(p, d))) {
+      if (Math.abs(meshVolume(geom)) < MIN_PIECE_VOLUME) crumbs++;
+      else pieces.push({ work: p, geom });
+    }
+  }
+  if (crumbs) warnings.push(`${crumbs} tiny crumb${crumbs === 1 ? '' : 's'} left by the cuts (under ${MIN_PIECE_VOLUME} mm³) ${crumbs === 1 ? 'was' : 'were'} left out.`);
+
+  pieces.forEach(({ work: p, geom }, i) => {
+    const bb = computeBounds(geom);
+    const tol = 0.5;
+    // Only the pins that belong to this piece matter for how it can lie.
+    const myPins = p.pins.filter((j) => {
+      const [x, y, z] = fromUVW(j.axis, j.u, j.v, j.value + d.length / 2);
+      return x >= bb.min[0] - tol && x <= bb.max[0] + tol && y >= bb.min[1] - tol && y <= bb.max[1] + tol && z >= bb.min[2] - tol && z <= bb.max[2] + tol;
+    });
+    const myHoles = p.holes.filter((j) => {
+      const [x, y, z] = fromUVW(j.axis, j.u, j.v, j.value);
+      return x >= bb.min[0] - tol && x <= bb.max[0] + tol && y >= bb.min[1] - tol && y <= bb.max[1] + tol && z >= bb.min[2] - tol && z <= bb.max[2] + tol;
+    });
+    const pinDirs = myPins.map((j) => fromUVW(j.axis, 0, 0, 1));
     const choices = (opts.autoOrient ? ROTATIONS : ROTATIONS.slice(0, 1)).map((r) => {
       const soup = rotateSoup(geom, r.f);
       const [w, h, z] = sizeOf(soup);
@@ -581,7 +639,7 @@ export function splitModel(positions: TriangleSoup, opts: SplitOptions): SplitRe
       return { soup, fits, score: orientationScore(soup, pinDirs, r.f, s, d) + (fits ? 0 : 1e12) };
     });
     const best = choices.reduce((m, c) => (c.score < m.score - 1e-3 ? c : m), choices[0]);
-    parts.push({ id: i, label: `Part ${i + 1}`, cell: p.cell, positions: geom, pins: p.pins.length, holes: p.holes.length, fits: best.fits });
+    parts.push({ id: i, label: `Part ${i + 1}`, cell: p.cell, positions: geom, pins: myPins.length, holes: myHoles.length, fits: best.fits });
     oriented.push(best.soup);
     if (!best.fits) warnings.push(`Part ${i + 1} is still too big for this printer: add more cuts.`);
   });
@@ -629,6 +687,59 @@ function centrePlate(parts: PlacedPart[], area: PlateArea) {
       p.positions[k] += dx;
       p.positions[k + 1] += dy;
     }
+}
+
+/**
+ * Splits a triangle soup into separate connected pieces. Vertices closer than
+ * `tol` mm count as shared, which absorbs rounding where caps meet the surface.
+ */
+export function connectedComponents(soup: Float32Array, tol = 0.02): Float32Array[] {
+  const nv = soup.length / 3;
+  if (nv === 0) return [];
+  const parent = new Int32Array(nv);
+  for (let i = 0; i < nv; i++) parent[i] = i;
+  const find = (i: number): number => {
+    while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+    return i;
+  };
+  const join = (a: number, b: number) => {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent[ra] = rb;
+  };
+  // Spatial hash: one representative vertex per tol-sized cell.
+  const cells = new Map<string, number>();
+  const t2 = tol * tol * 3;
+  for (let i = 0; i < nv; i++) {
+    const x = soup[i * 3], y = soup[i * 3 + 1], z = soup[i * 3 + 2];
+    const cx = Math.floor(x / tol), cy = Math.floor(y / tol), cz = Math.floor(z / tol);
+    const own = `${cx},${cy},${cz}`;
+    for (let dx = -1; dx <= 1; dx++)
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dz = -1; dz <= 1; dz++) {
+          const r = cells.get(`${cx + dx},${cy + dy},${cz + dz}`);
+          if (r === undefined) continue;
+          const ex = soup[r * 3] - x, ey = soup[r * 3 + 1] - y, ez = soup[r * 3 + 2] - z;
+          if (ex * ex + ey * ey + ez * ez <= t2) join(i, r);
+        }
+    if (!cells.has(own)) cells.set(own, i);
+  }
+  for (let t = 0; t < nv; t += 3) {
+    join(t, t + 1);
+    join(t, t + 2);
+  }
+  const groups = new Map<number, number[]>();
+  for (let t = 0; t < nv; t += 3) {
+    const r = find(t);
+    const g = groups.get(r);
+    if (g) g.push(t);
+    else groups.set(r, [t]);
+  }
+  if (groups.size === 1) return [soup];
+  return [...groups.values()].map((tris) => {
+    const out = new Float32Array(tris.length * 9);
+    tris.forEach((t, k) => out.set(soup.subarray(t * 3, t * 3 + 9), k * 9));
+    return out;
+  });
 }
 
 /** All parts of a plate as one triangle soup, ready for the slicer. */

@@ -16,12 +16,13 @@ import {
   type TriangleSoup,
 } from './slicer/mesh';
 import { KIND_COLORS } from './slicer';
-import { autoCuts, DEFAULT_DOWELS, plateSoup, type Cuts, type DowelOptions, type SplitOptions } from './slicer/split';
+import { autoCuts, cutsForPieceCount, DEFAULT_DOWELS, plateSoup, type Cuts, type DowelOptions, type SplitOptions } from './slicer/split';
+import { toBinaryStl } from './lib/stl';
 import { loadModelFile, SUPPORTED_EXTENSIONS } from './lib/loaders';
 import { loadJSON, saveJSON } from './lib/storage';
 import { useSlicer } from './lib/useSlicer';
 import { useSplit } from './lib/useSplit';
-import { Viewer, type CutPlane, type ViewerMesh } from './components/Viewer';
+import { Viewer, type BedCopy, type CutPlane, type ViewerMesh } from './components/Viewer';
 import { PrinterPanel } from './components/PrinterPanel';
 import { FilamentPanel } from './components/FilamentPanel';
 import { TransformPanel } from './components/TransformPanel';
@@ -54,6 +55,15 @@ const PART_COLORS = [0x3b82f6, 0xf59e0b, 0x10b981, 0xec4899, 0x8b5cf6, 0x06b6d4,
 const EXPLODE = 12;
 
 const toCss = ([r, g, b]: [number, number, number]) => `rgb(${r * 255}, ${g * 255}, ${b * 255})`;
+
+function saveBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
 export default function App() {
   // ── Profiles ────────────────────────────────────────────────────────────
@@ -97,14 +107,21 @@ export default function App() {
   // ── Splitting ───────────────────────────────────────────────────────────
   const [splitOn, setSplitOn] = useState(false);
   const [manualCuts, setManualCuts] = useState<Cuts | null>(null);
+  const [pieces, setPieces] = useState<number | null>(null);
   const [dowels, setDowels] = useState<DowelOptions>(() => ({ ...DEFAULT_DOWELS, ...loadJSON('dowels', {}) }));
   const [autoOrient, setAutoOrient] = useState(() => loadJSON('autoOrient', true));
   useEffect(() => saveJSON('dowels', dowels), [dowels]);
   useEffect(() => saveJSON('autoOrient', autoOrient), [autoOrient]);
 
+  const minimumPieces = useMemo(
+    () => autoCuts(size, printer, settings, dowels).reduce((n, l) => n * (l.length + 1), 1),
+    [size, printer, settings, dowels],
+  );
   const cuts = useMemo(
-    () => manualCuts ?? autoCuts(size, printer, settings, dowels),
-    [manualCuts, size, printer, settings, dowels],
+    () =>
+      manualCuts ??
+      (pieces !== null ? cutsForPieceCount(size, printer, settings, dowels, pieces).cuts : autoCuts(size, printer, settings, dowels)),
+    [manualCuts, pieces, size, printer, settings, dowels],
   );
   const splitOpts = useMemo<SplitOptions | null>(
     () => (splitOn && placed ? { cuts, dowels, autoOrient, printer, settings } : null),
@@ -117,6 +134,7 @@ export default function App() {
     setModel({ name, source });
     setTransform(IDENTITY_TRANSFORM);
     setManualCuts(null);
+    setPieces(null);
     setLoadError(null);
   }, []);
 
@@ -186,6 +204,21 @@ export default function App() {
     slicer.run({ plates, printer, filament, settings, modelName: model.name });
   };
 
+  const downloadStl = () => {
+    if (!splitResult || !model) return;
+    const base = model.name.replace(/\.[^.]+$/, '').replace(/[^\w-]+/g, '_') || 'model';
+    const files: Record<string, Uint8Array> = {};
+    const digits = String(splitResult.parts.length).length;
+    // Pieces are saved lying the way they should be printed.
+    splitResult.plates.forEach((plate, pi) =>
+      plate.parts.forEach((pp) => {
+        const n = String(pp.part + 1).padStart(digits, '0');
+        files[`${base}_piece${n}_plate${pi + 1}.stl`] = toBinaryStl(pp.positions, `${base} piece ${n}`);
+      }),
+    );
+    saveBlob(new Blob([zipSync(files, { level: 6 }).buffer as ArrayBuffer], { type: 'application/zip' }), `${base}_${splitResult.parts.length}-pieces_stl.zip`);
+  };
+
   const download = () => {
     if (!results || !model) return;
     const base = model.name.replace(/\.[^.]+$/, '').replace(/[^\w-]+/g, '_') || 'model';
@@ -201,21 +234,45 @@ export default function App() {
       blob = new Blob([zipped.buffer as ArrayBuffer], { type: 'application/zip' });
       name = `${stem}_${results.length}-plates.zip`;
     }
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = name;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    saveBlob(blob, name);
   };
 
   // ── What the 3D view shows ──────────────────────────────────────────────
+  // In the Plates view every plate is shown side by side on one screen.
+  const plateGrid = useMemo<BedCopy[] | undefined>(() => {
+    if (!splitResult || view !== 'plates') return undefined;
+    const n = splitResult.plates.length;
+    const cols = Math.ceil(Math.sqrt(n));
+    const rows = Math.ceil(n / cols);
+    const sx = printer.bedX + Math.max(30, printer.bedX * 0.15);
+    const sy = printer.bedY + Math.max(50, printer.bedY * 0.25);
+    return splitResult.plates.map((_, i) => ({
+      x: (i % cols) * sx,
+      y: (rows - 1 - Math.floor(i / cols)) * sy,
+      label: `Plate ${i + 1}`,
+    }));
+  }, [splitResult, view, printer]);
+
   const meshes = useMemo<ViewerMesh[]>(() => {
     if (!placed) return [];
     if (!splitOn) return [{ positions: placed, color: fitProblems.length ? ERROR_COLOR : MODEL_COLOR }];
     if (!splitResult) return [{ positions: placed, color: MODEL_COLOR }];
     const color = (i: number) => (splitResult.parts[i].fits ? PART_COLORS[i % PART_COLORS.length] : ERROR_COLOR);
-    if (view === 'plates' || view === 'layers') {
+    if (view === 'plates' && plateGrid) {
+      return splitResult.plates.flatMap((plate, i) =>
+        plate.parts.map((p) => {
+          const { x, y } = plateGrid[i];
+          const out = new Float32Array(p.positions.length);
+          for (let k = 0; k < out.length; k += 3) {
+            out[k] = p.positions[k] + x;
+            out[k + 1] = p.positions[k + 1] + y;
+            out[k + 2] = p.positions[k + 2];
+          }
+          return { positions: out, color: color(p.part) };
+        }),
+      );
+    }
+    if (view === 'layers') {
       const plate = splitResult.plates[plateIndex] ?? splitResult.plates[0];
       return plate ? plate.parts.map((p) => ({ positions: p.positions, color: color(p.part) })) : [];
     }
@@ -231,7 +288,7 @@ export default function App() {
       }
       return { positions: out, color: color(i) };
     });
-  }, [placed, splitOn, splitResult, view, plateIndex, fitProblems.length]);
+  }, [placed, splitOn, splitResult, view, plateIndex, plateGrid, fitProblems.length]);
 
   const planes = useMemo<CutPlane[]>(() => {
     if (!splitResult || !bounds || view !== 'model') return [];
@@ -253,8 +310,10 @@ export default function App() {
 
   const layerCount = current?.stats.layerCount ?? 0;
   const layerZ = current?.preview.layerZ[layer];
-  const showPlatePicker = plateCount > 1 && (view === 'plates' || view === 'layers');
-  const tabs: [View, string][] = splitOn ? [['model', 'Parts'], ['plates', 'Plates'], ['layers', 'Layers']] : [['model', 'Model'], ['layers', 'Layers']];
+  const showPlatePicker = plateCount > 1 && view === 'layers';
+  const tabs: [View, string][] = splitOn
+    ? [['model', 'Pieces'], ['plates', plateCount > 1 ? `All ${plateCount} plates` : 'Plate'], ['layers', 'Layers']]
+    : [['model', 'Model'], ['layers', 'Layers']];
   const visibleTabs = tabs.filter(([v]) => v !== 'layers' || !!results);
   // Split parts are checked per plate; the whole model only matters when not splitting.
   const warnings = [...(splitOn ? [] : fitProblems), ...(results?.flatMap((r) => r.warnings) ?? [])].filter(
@@ -352,10 +411,16 @@ export default function App() {
             enabled={splitOn}
             onEnabledChange={enableSplit}
             tooBig={fitProblems.length > 0}
+            pieces={pieces}
+            onPiecesChange={(n) => {
+              setPieces(n);
+              setManualCuts(null);
+            }}
+            minimumPieces={minimumPieces}
             cuts={cuts}
             manual={!!manualCuts}
             onCutsChange={setManualCuts}
-            onAuto={() => setManualCuts(null)}
+            onDownloadStl={downloadStl}
             size={size}
             dowels={dowels}
             onDowelsChange={setDowels}
@@ -389,7 +454,8 @@ export default function App() {
             preview={view === 'layers' ? current?.preview ?? null : null}
             mode={view === 'layers' ? 'preview' : 'model'}
             layer={layer}
-            frameKey={`${model?.name}|${view}|${plateIndex}|${splitOn && !!splitResult}|${transform.scale.join()}`}
+            frameKey={`${model?.name}|${view}|${view === 'layers' ? plateIndex : ''}|${splitOn && !!splitResult}|${transform.scale.join()}`}
+            beds={plateGrid}
           />
 
           {!model && (
@@ -444,7 +510,7 @@ export default function App() {
               <p key={w} className={fitProblems.includes(w) ? 'error small' : 'warning small'}>{w}</p>
             ))}
             {!splitOn && fitProblems.length > 0 && (
-              <button className="btn ghost small" onClick={() => enableSplit(true)}>Split it into parts that fit</button>
+              <button className="btn ghost small" onClick={() => enableSplit(true)}>Split it into pieces that fit</button>
             )}
             {slicer.error && <p className="error small">Slicing failed: {slicer.error}</p>}
 
