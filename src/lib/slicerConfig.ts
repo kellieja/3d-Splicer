@@ -132,20 +132,37 @@ export const HOW_TO_OPEN = `How to open this project
 Files
 -----
 Plate 1.3mf, Plate 2.3mf, ...  One file per plate. Pieces are already laid flat and placed.
-All plates.3mf                 Every piece in one file, plate by plate (handy in Bambu Studio / OrcaSlicer).
+All plates.3mf                 Every piece in one file. They open together on plate 1
+                               (overlapping); press Arrange to spread them over the plates.
+Creality-Orca project (beta).3mf
+                               EXPERIMENTAL: plates already set up for Creality Print,
+                               OrcaSlicer and Bambu Studio. Use File > Open Project.
 Original model.3mf             The whole model before cutting, for reference.
 settings.ini                   Print settings for PrusaSlicer / SuperSlicer.
 SETTINGS.txt                   The same settings in plain English, for any slicer.
 
 Supports are turned OFF in these settings so you can add your own.
 
-Bambu Studio / OrcaSlicer
--------------------------
-1. File > Import > Import 3MF/STL/... and choose "All plates.3mf" (or one "Plate N.3mf").
-2. Pick your printer and filament presets, and copy the values from SETTINGS.txt.
-3. Supports: turn on "Enable support" and pick Normal or Tree, or use the support
+Creality Print, OrcaSlicer, Bambu Studio (and Elegoo / Anycubic slicers based on them)
+-------------------------------------------------------------------------------------
+Easiest, works every time:
+1. Choose your printer and filament first.
+2. Open "All plates.3mf". All pieces appear on plate 1, on top of each other.
+3. Press Arrange (the Arrange button, or the A key). The slicer spreads the pieces out
+   and adds as many plates as it needs. If it asks, allow it to add plates. If it
+   doesn't, add plates with the + button next to the plates and press Arrange again.
+4. Copy any values you want from SETTINGS.txt.
+5. Supports: turn on "Enable support" and pick Normal or Tree, or use the support
    painting tool to paint exactly where supports go.
-4. Tip: the "Arrange" button can spread the pieces over several plates automatically.
+
+Or try the beta file with the plates already set up:
+1. File > Open Project and choose "Creality-Orca project (beta).3mf".
+2. If the slicer asks whether to load the project's settings, choose Yes to get the plates.
+   Then pick your own printer and filament presets again (the file brings simple
+   "3D Splicer" presets with it).
+3. If the pieces still all land on plate 1 or you see an error, use "All plates.3mf" above.
+
+Or open one "Plate N.3mf" at a time: these always work in every slicer.
 
 PrusaSlicer / SuperSlicer
 -------------------------
@@ -159,8 +176,8 @@ Ultimaker Cura
 2. Select your printer and copy the values from SETTINGS.txt.
 3. Supports: tick "Generate Support" (choose Normal or Tree), or use the Support Blocker tool.
 
-Creality Print, Elegoo / Anycubic slicers and others
-----------------------------------------------------
+Other slicers
+-------------
 Open each "Plate N.3mf" (or import it as a model), choose your printer, copy the values from
 SETTINGS.txt, and turn on or paint supports where needed.
 

@@ -2,7 +2,13 @@ import { strToU8, zipSync } from 'fflate';
 import type { FilamentProfile, PrintSettings, PrinterProfile } from '../types';
 import type { TriangleSoup } from '../slicer/mesh';
 import { build3mf, type ThreeMfObject } from './threemf';
+import { buildOrcaProject3mf } from './orcaProject';
 import { HOW_TO_OPEN, toPrusaIni, toSettingsText } from './slicerConfig';
+
+export { plateColumns } from './orcaProject';
+
+/** File name of the experimental multi-plate project. */
+export const ORCA_BETA_FILE = 'Creality-Orca project (beta).3mf';
 
 export interface SlicerProjectInput {
   modelName: string;
@@ -13,13 +19,6 @@ export interface SlicerProjectInput {
   printer: PrinterProfile;
   filament: FilamentProfile;
   settings: PrintSettings;
-}
-
-/** Bambu Studio / OrcaSlicer lay plates out in a grid with this many columns. */
-export function plateColumns(count: number): number {
-  const v = Math.sqrt(count);
-  const r = Math.round(v);
-  return v > r ? r + 1 : r;
 }
 
 /**
@@ -37,23 +36,15 @@ export function buildSlicerProject(input: SlicerProjectInput): Uint8Array {
     files[`Plate ${i + 1}.3mf`] = build3mf(objects, { title: `${title} - plate ${i + 1}`, extras: notes });
   });
 
-  // Every plate in one file, laid out like the plate grid in Bambu Studio / OrcaSlicer
-  // (1.2 x bed size apart, rows going towards the front).
-  const cols = plateColumns(input.plates.length);
-  const all: ThreeMfObject[] = input.plates.flatMap((objects, i) => {
-    const dx = (i % cols) * printer.bedX * 1.2;
-    const dy = -Math.floor(i / cols) * printer.bedY * 1.2;
-    return objects.map((o) => {
-      const moved = new Float32Array(o.positions.length);
-      for (let k = 0; k < moved.length; k += 3) {
-        moved[k] = o.positions[k] + dx;
-        moved[k + 1] = o.positions[k + 1] + dy;
-        moved[k + 2] = o.positions[k + 2];
-      }
-      return { name: `Plate ${i + 1} - ${o.name}`, positions: moved };
-    });
-  });
-  if (input.plates.length > 1) files['All plates.3mf'] = build3mf(all, { title: `${title} - all plates`, extras: notes });
+  if (input.plates.length > 1) {
+    // Every piece in one file, each at its spot on its own plate but all laid over plate 1,
+    // so every slicer opens it without "outside the plate" errors. Press Arrange to spread
+    // the pieces over as many plates as needed.
+    const all = input.plates.flatMap((objects, i) => objects.map((o) => ({ ...o, name: `Plate ${i + 1} - ${o.name}` })));
+    files['All plates.3mf'] = build3mf(all, { title: `${title} - all plates`, extras: notes });
+    // Experimental: plates already set up for Creality Print / OrcaSlicer / Bambu Studio.
+    files[ORCA_BETA_FILE] = buildOrcaProject3mf({ title: `${title} - all plates`, plates: input.plates, printer, filament, settings: noSupports });
+  }
 
   files['Original model.3mf'] = build3mf([{ name: `${title} (uncut)`, positions: input.original }], { title: `${title} - original` });
   files['settings.ini'] = strToU8(toPrusaIni(printer, filament, noSupports));
