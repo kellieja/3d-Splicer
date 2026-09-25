@@ -624,8 +624,15 @@ export default function App() {
                 <div className="download-list">
                   <button className="btn wide" disabled={!canExport} onClick={exportForSlicers}>Project for another slicer (.zip)</button>
                   <p className="muted small">
-                    Opens in Bambu Studio, OrcaSlicer, PrusaSlicer, Cura and others, with supports off so you can add your own.
+                    Opens in Creality Print, Bambu Studio, OrcaSlicer, PrusaSlicer, Cura and others, with supports off so you can add your own.
                   </p>
+                  {splitOn && splitResult && splitResult.plates.length > 1 && (
+                    <p className="muted small">
+                      Creality Print / Orca / Bambu: open <strong>All plates.3mf</strong> (pieces arrive together on plate 1),
+                      then press <strong>Arrange</strong> to spread them over the plates. The zip also has an experimental
+                      file with the plates already set up; see HOW TO OPEN.txt inside.
+                    </p>
+                  )}
                   <div className="row">
                     <button className="btn" disabled={!model} onClick={saveProjectFile}>Save project</button>
                     <button className="btn ghost" onClick={() => fileInput.current?.click()}>Open project…</button>

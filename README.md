@@ -131,7 +131,8 @@ In step **6 Download**, click **Project for another slicer (.zip)**. Inside:
 | File | What it's for |
 | --- | --- |
 | `Plate 1.3mf`, `Plate 2.3mf`, … | One standard 3MF per plate, pieces laid flat and placed. Opens in every slicer. |
-| `All plates.3mf` | Every piece in one file, plate by plate (handy in Bambu Studio / OrcaSlicer). |
+| `All plates.3mf` | Every piece in one file. They open together on plate 1; press **Arrange** in Creality Print, Bambu Studio or OrcaSlicer to spread them over the plates. |
+| `Creality-Orca project (beta).3mf` | **Experimental:** the plates already set up for Creality Print, OrcaSlicer and Bambu Studio (File → Open Project). If it doesn't work in your version, use `All plates.3mf`. |
 | `Original model.3mf` | The whole model before cutting. |
 | `settings.ini` | Your settings for PrusaSlicer / SuperSlicer (File → Import Config). |
 | `SETTINGS.txt` | The same settings in plain English, to copy into any slicer. |

@@ -89,6 +89,7 @@ export function build3mf(objects: ThreeMfObject[], opts: ThreeMfOptions = {}): U
         `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
         `<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>` +
         `<Default Extension="txt" ContentType="text/plain"/>` +
+        `<Default Extension="config" ContentType="text/xml"/>` +
         `</Types>`,
     ),
     '_rels/.rels': strToU8(

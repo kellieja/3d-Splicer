@@ -255,6 +255,49 @@ describe('project export', () => {
     expect(strFromU8(plate['3D/3dmodel.model'])).toContain('<object id="1" name="Piece');
   });
 
+  it('opens "All plates.3mf" inside plate 1 and sets up plates in the beta file', async () => {
+    const { unzipSync, strFromU8 } = await import('fflate');
+    const { buildSlicerProject, ORCA_BETA_FILE } = await import('../src/lib/exportProject');
+    const model = big(400);
+    const r = splitModel(model, { cuts: autoCuts([400, 400, 400], ender, settings, DEFAULT_DOWELS), dowels: DEFAULT_DOWELS, autoOrient: true, printer: ender, settings });
+    expect(r.plates.length).toBeGreaterThan(1);
+    const pieces = r.plates.reduce((n, pl) => n + pl.parts.length, 0);
+    const files = unzipSync(buildSlicerProject({
+      modelName: 'cube.stl',
+      original: model,
+      plates: r.plates.map((pl) => pl.parts.map((pp) => ({ name: `Piece ${pp.part + 1}`, positions: pp.positions }))),
+      printer: ender,
+      filament: pla,
+      settings,
+    }));
+
+    // Every build item of "All plates.3mf" sits within plate 1, so no slicer reports it outside the plate.
+    const all = strFromU8(unzipSync(files['All plates.3mf'])['3D/3dmodel.model']);
+    const items = [...all.matchAll(/transform="1 0 0 0 1 0 0 0 1 ([\d.-]+) ([\d.-]+) ([\d.-]+)"/g)];
+    expect(items.length).toBe(pieces);
+    for (const m of items) {
+      expect(+m[1]).toBeGreaterThanOrEqual(0);
+      expect(+m[1]).toBeLessThanOrEqual(ender.bedX);
+      expect(+m[2]).toBeGreaterThanOrEqual(0);
+      expect(+m[2]).toBeLessThanOrEqual(ender.bedY);
+    }
+
+    // Beta file: one <plate> per plate listing each piece's object id once, plus project settings.
+    const beta = unzipSync(files[ORCA_BETA_FILE]);
+    const plates = strFromU8(beta['Metadata/model_settings.config']);
+    expect([...plates.matchAll(/<plate>/g)].length).toBe(r.plates.length);
+    const ids = [...plates.matchAll(/key="object_id" value="(\d+)"/g)].map((m) => +m[1]);
+    expect(ids).toEqual(Array.from({ length: pieces }, (_, i) => i + 1));
+    const cfg = JSON.parse(strFromU8(beta['Metadata/project_settings.config']));
+    expect(cfg.filament_colour).toHaveLength(1);
+    expect(cfg.enable_support).toBe('0');
+    expect(cfg.printable_area).toEqual(['0x0', '220x0', '220x220', '0x220']);
+    // Plate 2's pieces are moved to plate 2 of the grid (1.2 x bed to the right).
+    const model3d = strFromU8(beta['3D/3dmodel.model']);
+    const xs = [...model3d.matchAll(/transform="1 0 0 0 1 0 0 0 1 ([\d.-]+) /g)].map((m) => +m[1]);
+    expect(Math.max(...xs)).toBeGreaterThan(ender.bedX * 1.2);
+  });
+
   it('saves and reopens a 3D Splicer project', async () => {
     const { saveProject, loadProject } = await import('../src/lib/project');
     const cube = placeOnBed(makeCube(20), IDENTITY_TRANSFORM, ender);
